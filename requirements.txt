@@ -1,0 +1,4 @@
+google-adk>=1.0.0
+pypdf>=4.0.0
+sympy>=1.12
+pytest>=8.0.0

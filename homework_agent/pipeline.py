@@ -1,0 +1,74 @@
+"""End-to-end grading pipeline: parse -> grade -> report -> email.
+
+This is the deterministic core the ADK agents call through their tools, and
+what the offline demo (`demo.py`) runs directly without any LLM API key.
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Dict, List
+
+from . import assignments, grading, report, submission
+from .email_service import EmailMessage, MockEmailService
+from .models import Assignment, GradedSheet, Submission
+
+
+def run_pipeline(
+    assignment: Assignment,
+    student_name: str,
+    student_email: str,
+    submission_format: str,
+    content: str,
+    transcribed_text: str | None = None,
+    email_service: MockEmailService | None = None,
+) -> tuple[GradedSheet, List[EmailMessage]]:
+    """Grade one homework submission and email the evaluated sheet.
+
+    Returns (graded_sheet, [student_email, teacher_email]).
+    """
+    mailer = email_service or MockEmailService()
+
+    sub = Submission(
+        student_name=student_name,
+        student_email=student_email,
+        assignment_id=assignment.id,
+        format=submission_format,
+        content=content,
+        transcribed_text=transcribed_text,
+    )
+    answers: Dict[str, str] = submission.extract_answers(sub)
+    sheet = grading.grade_submission(assignment, answers)
+    sheet = replace(sheet, student_name=student_name, student_email=student_email)
+
+    body_text = report.render_plain_text(sheet)
+    body_md = report.render_markdown(sheet)
+    full_body = body_text + "\n\n--- Markdown version ---\n\n" + body_md
+    attachment = f"{assignment.id}-{student_name.replace(' ', '_')}-graded.md"
+
+    student_msg = mailer.send(
+        to=student_email,
+        subject=report.student_subject(sheet),
+        body=(
+            f"Hi {student_name},\n\n"
+            f"Your homework '{assignment.title}' has been graded. "
+            f"Your score: {sheet.total_earned:g}/{sheet.total_possible:g} "
+            f"({sheet.percentage:.1f}%).\n\n"
+            f"See the full evaluated sheet below.\n\n" + full_body
+        ),
+        attachments=[attachment],
+    )
+    teacher_msg = mailer.send(
+        to=assignment.teacher_email,
+        subject=report.teacher_subject(sheet),
+        body=(
+            f"Hi {assignment.teacher_name},\n\n"
+            f"{student_name} <{student_email}> submitted '{assignment.title}'. "
+            f"Score: {sheet.total_earned:g}/{sheet.total_possible:g} "
+            f"({sheet.percentage:.1f}%), {sheet.correct_count}/{len(sheet.evaluations)} correct.\n\n"
+            f"Evaluated sheet:\n\n" + full_body
+        ),
+        cc=[student_email],
+        attachments=[attachment],
+    )
+    return sheet, [student_msg, teacher_msg]

@@ -1,0 +1,4 @@
+Q1: b
+Q2: The sun heats the puddle and the water evaporates into water vapor, using heat energy from sunlight.
+Q3: condensation
+Q4: a

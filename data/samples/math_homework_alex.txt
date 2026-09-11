@@ -1,0 +1,5 @@
+Q1: 3/4
+Q2: x = 4
+Q3: b
+Q4: x^2 + 5x + 6
+Q5: 5/8 of the pizza is left because 8 - 3 = 5 slices remain.
