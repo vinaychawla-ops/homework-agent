@@ -16,6 +16,13 @@ import modal
 
 app = modal.App("homework-grader")
 
+# Shared volume for Gradio uploads. Modal can route the upload POST and the
+# grading request to different containers; without a shared temp dir the
+# grading container cannot see the uploaded file (FileNotFoundError).
+uploads_volume = modal.Volume.from_name(
+    "homework-grader-uploads", create_if_missing=True
+)
+
 
 def warmup_docling() -> None:
     """Download Docling's local OCR models at image build time."""
@@ -46,6 +53,8 @@ image = (
     memory=8192,
     timeout=900,
     secrets=[modal.Secret.from_name("openrouter-api-key")],
+    volumes={"/gradio-tmp": uploads_volume},
+    env={"GRADIO_TEMP_DIR": "/gradio-tmp"},
 )
 @modal.asgi_app()
 def web():

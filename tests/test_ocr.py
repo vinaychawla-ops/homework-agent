@@ -84,7 +84,7 @@ def stub_docling(monkeypatch):
     CAPTURED.clear()
     _FakeConverter.behavior = staticmethod(lambda path: "Q1: stubbed")
     _FakeConverter.seen_format_options = None
-    for var in (ocr.ENV_API_KEY, ocr.ENV_MODEL, ocr.ENV_IMAGE_MODE):
+    for var in (ocr.ENV_API_KEY, ocr.ENV_MODEL, ocr.ENV_FALLBACK_MODELS, ocr.ENV_IMAGE_MODE):
         monkeypatch.delenv(var, raising=False)
     return _FakeConverter
 
@@ -115,7 +115,10 @@ def test_image_mode_invalid(stub_docling):
 def test_transcribe_image_vlm_when_key_set(stub_docling, monkeypatch):
     monkeypatch.setenv(ocr.ENV_API_KEY, "k")
     assert ocr.transcribe_image("/tmp/x.png") == "Q1: stubbed"
-    assert CAPTURED["api_opts"]["params"]["model"] == ocr.DEFAULT_VLM_MODEL
+    assert CAPTURED["api_opts"]["params"]["models"] == [
+        ocr.DEFAULT_VLM_MODEL,
+        *ocr.DEFAULT_FALLBACK_MODELS,
+    ]
 
 
 def test_transcribe_image_docling_without_key(stub_docling):
@@ -146,10 +149,23 @@ def test_transcribe_handwriting_config(stub_docling, monkeypatch):
     monkeypatch.setenv(ocr.ENV_MODEL, "some/model:free")
     assert ocr.transcribe_handwriting("/tmp/x.png") == "Q1: stubbed"
     assert CAPTURED["api_opts"]["url"] == ocr.OPENROUTER_CHAT_COMPLETIONS_URL
-    assert CAPTURED["api_opts"]["params"]["model"] == "some/model:free"
+    params = CAPTURED["api_opts"]["params"]
+    assert params["models"] == ["some/model:free", *ocr.DEFAULT_FALLBACK_MODELS]
+    assert "model" not in params
     assert CAPTURED["api_opts"]["headers"] == {"Authorization": "Bearer k"}
     assert CAPTURED["pipeline_opts"]["enable_remote_services"] is True
     assert _FakeConverter.seen_format_options is not None
+
+
+def test_transcribe_handwriting_single_model_param_without_fallbacks(
+    stub_docling, monkeypatch
+):
+    monkeypatch.setenv(ocr.ENV_API_KEY, "k")
+    monkeypatch.setenv(ocr.ENV_FALLBACK_MODELS, "")
+    assert ocr.transcribe_handwriting("/tmp/x.png") == "Q1: stubbed"
+    params = CAPTURED["api_opts"]["params"]
+    assert params["model"] == ocr.DEFAULT_VLM_MODEL
+    assert "models" not in params
 
 
 def test_transcribe_handwriting_retries_rate_limit(stub_docling, monkeypatch):
@@ -166,7 +182,39 @@ def test_transcribe_handwriting_retries_rate_limit(stub_docling, monkeypatch):
     _FakeConverter.behavior = staticmethod(behavior)
     assert ocr.transcribe_handwriting("/tmp/x.png", max_retries=3) == "Q1: recovered"
     assert calls["n"] == 3
-    assert calls["sleeps"] == [10, 20]
+    # jittered backoff: 10 * 2^attempt * uniform(0.8, 1.25)
+    assert 8.0 <= calls["sleeps"][0] <= 12.5
+    assert 16.0 <= calls["sleeps"][1] <= 25.0
+
+
+def test_backoff_sleep_applies_jitter(stub_docling, monkeypatch):
+    sleeps = []
+    monkeypatch.setattr(ocr.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(ocr.random, "uniform", lambda a, b: 1.0)
+    ocr._backoff_sleep(10, 2)
+    assert sleeps == [40.0]
+
+
+def test_vlm_model_list_defaults(stub_docling):
+    assert ocr._vlm_model_list("primary/m") == [
+        "primary/m",
+        *ocr.DEFAULT_FALLBACK_MODELS,
+    ]
+
+
+def test_vlm_model_list_env_override(stub_docling, monkeypatch):
+    monkeypatch.setenv(ocr.ENV_FALLBACK_MODELS, "a/b, c/d ")
+    assert ocr._vlm_model_list("primary/m") == ["primary/m", "a/b", "c/d"]
+
+
+def test_vlm_model_list_env_empty_disables(stub_docling, monkeypatch):
+    monkeypatch.setenv(ocr.ENV_FALLBACK_MODELS, "")
+    assert ocr._vlm_model_list("primary/m") == ["primary/m"]
+
+
+def test_vlm_model_list_dedupes_primary(stub_docling, monkeypatch):
+    monkeypatch.setenv(ocr.ENV_FALLBACK_MODELS, "primary/m, other/n")
+    assert ocr._vlm_model_list("primary/m") == ["primary/m", "other/n"]
 
 
 def test_transcribe_handwriting_gives_up_after_retries(stub_docling, monkeypatch):
@@ -222,7 +270,9 @@ def test_transcribe_handwriting_rate_limit_empty_result_retries(
     _FakeConverter.behavior = staticmethod(behavior)
     assert ocr.transcribe_handwriting("/tmp/x.png", max_retries=3) == "Q1: recovered"
     assert calls["n"] == 3
-    assert calls["sleeps"] == [15, 30]
+    # jittered backoff: 15 * 2^attempt * uniform(0.8, 1.25)
+    assert 12.0 <= calls["sleeps"][0] <= 18.75
+    assert 24.0 <= calls["sleeps"][1] <= 37.5
 
 
 def test_transcribe_handwriting_rate_limit_empty_result_gives_up(

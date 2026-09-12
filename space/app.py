@@ -77,7 +77,14 @@ def grade_homework(
             ocr_mode=ocr_mode,
         )
     except Exception as exc:  # surface OCR / API failures readably
-        raise gr.Error(f"Could not grade this submission: {exc}")
+        # Return (don't raise): the message stays visible in the page even if
+        # the session drops, instead of flashing as a toast before a reload.
+        sheet_md = (
+            "### Could not grade this submission\n\n"
+            f"{exc}\n\n"
+            "_Try a smaller or clearer photo, or switch the OCR mode and retry._"
+        )
+        return sheet_md, "_No emails were sent._"
 
     sheet_md = report.render_markdown(sheet)
     email_lines = "\n".join(f"- **to:** {m.to} — {m.subject}" for m in emails)

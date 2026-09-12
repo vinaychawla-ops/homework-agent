@@ -23,7 +23,10 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   graded Markdown sheet; email stays mock-only (recipients listed, nothing
   sent). Deployed on Modal via `modal_app.py` (image with Docling + baked OCR
   models, served with `gr.mount_gradio_app` on FastAPI through
-  `@modal.asgi_app()`). Keep UI logic thin — grading stays in the core.
+  `@modal.asgi_app()`). `GRADIO_TEMP_DIR` points at the shared
+  `homework-grader-uploads` Modal Volume so an upload and its grading request
+  can land on different containers without FileNotFoundError. Keep UI logic
+  thin — grading stays in the core.
 
 ## Conventions
 
