@@ -18,6 +18,12 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   agent prompts; prompts only orchestrate and narrate.
 - **Demo** (`demo.py`) calls `pipeline.run_pipeline` directly — no API key, same
   logic the agents use.
+- **Browser UI** (`space/app.py`): Gradio `Blocks` UI that calls
+  `pipeline.run_pipeline` for typed/PDF/image submissions and renders the
+  graded Markdown sheet; email stays mock-only (recipients listed, nothing
+  sent). Deployed on Modal via `modal_app.py` (image with Docling + baked OCR
+  models, served with `gr.mount_gradio_app` on FastAPI through
+  `@modal.asgi_app()`). Keep UI logic thin — grading stays in the core.
 
 ## Conventions
 
@@ -33,10 +39,18 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 ## Running things
 
-- Venv: `~/workspace/venvs/homework-agent` (has google-adk, pytest, pypdf, sympy, docling).
-- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 80 tests
+- Venv: `~/workspace/venvs/homework-agent` (has google-adk, pytest, pypdf, sympy,
+  docling, gradio, modal).
+- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 86 tests
   at last count (Docling OCR paths are stubbed in tests - no network).
 - Demo: `python demo.py [math|pdf|image|science|all]`.
+- Gradio UI: `python space/app.py` (needs `gradio>=5.0`).
+- Modal deploy: `modal deploy modal_app.py` from repo root with
+  `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` set (from modal.com/settings/tokens).
+  The OpenRouter key must exist as a Modal secret named `openrouter-api-key`
+  (env `OPENROUTER_API_KEY`) or the handwriting VLM path errors gracefully.
+  Verify with `modal run modal_verify.py`. Redeploys reuse the cached image
+  (seconds) unless the image definition changes.
 
 ## Known demo seams (production TODOs)
 
@@ -46,6 +60,10 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 3. Free-tier OpenRouter rate limits can make the VLM handwriting path flaky;
    retries with backoff are built in, but a paid key or self-hosted VLM would
    be steadier for production.
+4. Modal deployment: the app scales to zero when idle, so the first request
+   after inactivity pays a cold start (~15s: container boot + torch import).
+   OCR models are baked into the image at build time (`warmup_docling`), so
+   they are not re-downloaded per container.
 
 ## Sample data
 

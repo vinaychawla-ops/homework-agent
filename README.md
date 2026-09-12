@@ -29,11 +29,18 @@ homework-agent/
 │   ├── models.py         # Question, Assignment, Submission, GradedSheet, ...
 │   ├── assignments.py    # Sample Math + Science assignments with answer keys
 │   ├── submission.py     # Parsers for text / PDF / image submissions
+│   ├── ocr.py            # Docling OCR (standard) + OpenRouter VLM handwriting
 │   ├── grading.py        # Grading engine (math equivalence, science rubric)
 │   ├── report.py         # Evaluated-sheet rendering (markdown + plain text)
 │   └── email_service.py  # MockEmailService (records to an outbox)
+├── space/
+│   ├── app.py                # Gradio browser UI (upload/type homework, get graded sheet)
+│   ├── Dockerfile            # Container build for the Gradio UI
+│   └── requirements-space.txt
+├── modal_app.py          # Modal deployment: builds the image, serves the Gradio UI
+├── modal_verify.py       # One-off check that the OpenRouter secret + VLM path work on Modal
 ├── data/samples/         # Sample submissions (txt, pdf, png)
-├── tests/                # pytest suite (56 tests)
+├── tests/                # pytest suite (86 tests)
 ├── demo.py               # Offline end-to-end demo (no API key needed)
 ├── requirements.txt
 ├── README.md
@@ -57,6 +64,39 @@ python demo.py ocr        # real Docling OCR on the sample photo (see below)
 # run the tests
 python -m pytest tests/ -q
 ```
+
+## Browser demo (Gradio UI)
+
+`space/app.py` is a Gradio web UI on top of the same deterministic pipeline:
+pick an assignment, enter the student, then submit typed text, a PDF, or a
+homework photo, and get the graded sheet back in the browser. Email stays
+mock-only (recipients are shown, nothing is sent).
+
+```bash
+pip install "gradio>=5.0"
+python space/app.py   # then open http://127.0.0.1:7860
+```
+
+The UI is also deployed publicly on Modal (free-tier credits):
+
+**https://chawlavinay--homework-grader-web.modal.run**
+
+To redeploy (`modal_app.py` builds the container image with Docling baked in
+and serves the Gradio app as an ASGI app):
+
+```bash
+pip install modal
+export MODAL_TOKEN_ID=ak-... MODAL_TOKEN_SECRET=as-...   # from modal.com/settings/tokens
+modal deploy modal_app.py
+```
+
+Handwriting VLM mode on the deployment needs a Modal secret named
+`openrouter-api-key` containing `OPENROUTER_API_KEY` (dashboard → Secrets);
+without it, image grading falls back to the local Docling pipeline.
+`modal run modal_verify.py` checks the secret and the VLM path end-to-end.
+
+Note: Hugging Face Spaces was evaluated for hosting but Docker/Gradio Spaces
+there now require a paid subscription, so Modal is the current host.
 
 ## Handwriting OCR (Docling)
 
