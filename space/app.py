@@ -189,38 +189,73 @@ _SAMPLE_JS = """async () => {
 }"""
 
 _GRADE_JS = """async (assignment_id, student_name, student_email, submission_type, typed_text, upload_b64, ocr_mode) => {
-    // Read the selected file straight from the page: the bytes travel with
-    // this request, so grading never depends on which container served what.
-    const fileInput = document.querySelector('#upload-box input[type="file"]');
-    const file = fileInput && fileInput.files && fileInput.files[0];
-    let b64 = upload_b64 || '';
-    if (file) {
-        b64 = await new Promise((resolve, reject) => {
-            const r = new FileReader();
-            r.onload = () => resolve(String(r.result).split(',')[1]);
-            r.onerror = () => reject(new Error('Could not read the selected file.'));
-            r.readAsDataURL(file);
-        });
-    }
+    // Immediate feedback: this runs before any await, so if the event fires
+    // at all the user sees it. If even this never appears, the click handler
+    // itself is not running (not a network issue).
+    const statusEl = document.getElementById('grade-status');
+    const setStatus = (t) => { if (statusEl) statusEl.innerHTML = t; };
+    setStatus('_Grading — contacting the grader…_');
+    const done = (sheet, email) => { setStatus(''); return [sheet, email]; };
+    const fail = (msg) => done(
+        '### Could not grade this submission\\n\\n' + msg + '\\n\\n_Please retry._',
+        '_No emails were sent._'
+    );
     try {
-        const resp = await fetch('/api/grade', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-                assignment_id: assignment_id,
-                student_name: student_name,
-                student_email: student_email,
-                submission_type: submission_type,
-                typed_text: typed_text,
-                upload_b64: b64,
-                ocr_mode: ocr_mode,
-            }),
-        });
+        // Read the selected file straight from the page: the bytes travel with
+        // this request, so grading never depends on which container served what.
+        const fileInput = document.querySelector('#upload-box input[type="file"]');
+        const file = fileInput && fileInput.files && fileInput.files[0];
+        let b64 = upload_b64 || '';
+        if (file) {
+            try {
+                b64 = await new Promise((resolve, reject) => {
+                    const r = new FileReader();
+                    r.onload = () => resolve(String(r.result).split(',')[1]);
+                    r.onerror = () => reject(new Error('Could not read the selected file.'));
+                    r.readAsDataURL(file);
+                });
+            } catch (e) {
+                return fail('Could not read the selected file: ' + (e.message || e));
+            }
+        }
+        // AbortController timeout: a hung connection must surface as an error,
+        // never as eternal silence.
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
+        let resp;
+        try {
+            resp = await fetch('/api/grade', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    assignment_id: assignment_id,
+                    student_name: student_name,
+                    student_email: student_email,
+                    submission_type: submission_type,
+                    typed_text: typed_text,
+                    upload_b64: b64,
+                    ocr_mode: ocr_mode,
+                }),
+                signal: controller.signal,
+            });
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                return fail('The request timed out after 3 minutes. The server may be busy — please retry.');
+            }
+            throw e;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (!resp.ok) {
+            return fail('The server returned HTTP ' + resp.status + '. Please retry.');
+        }
         const data = await resp.json();
-        return [data.sheet_md, data.email_md];
+        if (!data || typeof data.sheet_md !== 'string') {
+            return fail('The server returned an unexpected response. Please retry.');
+        }
+        return done(data.sheet_md, data.email_md || '_No emails were sent._');
     } catch (e) {
-        return ['### Could not grade this submission\\n\\n' + e + '\\n\\n_Please retry._',
-                '_No emails were sent._'];
+        return fail(e && e.message ? e.message : String(e));
     }
 }"""
 
@@ -280,6 +315,7 @@ otherwise the local pipeline does its best."""
     with gr.Row():
         grade_btn = gr.Button("Grade homework", variant="primary")
         sample_btn = gr.Button("Use sample photo")
+    grade_status = gr.Markdown("", elem_id="grade-status")
 
     sample_btn.click(None, inputs=[], outputs=[upload_b64, sample_status], js=_SAMPLE_JS)
 
