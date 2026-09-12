@@ -3,6 +3,15 @@
 Upload a homework submission — typed text, a PDF, or a photo of handwritten
 work — pick an assignment, and get back the graded sheet. Email delivery is
 mocked: the UI shows which messages would have been sent.
+
+Architecture note: grading is served through a plain FastAPI endpoint
+(`POST /api/grade`) that the page calls with `fetch`. Gradio's queue keeps
+event state in container-local memory, and Modal can route the queue-join
+POST and the follow-up event-stream GET to different containers, which made
+grading fail probabilistically (404 on the event stream). A single
+request/response has no cross-request server state, so it works on any
+container. The Gradio UI is therefore just a form — every button is
+JavaScript-only (`fn=None`).
 """
 
 from __future__ import annotations
@@ -12,6 +21,9 @@ import os
 import tempfile
 
 import gradio as gr
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
 
 from homework_agent import assignments, pipeline, report
 from homework_agent.email_service import MockEmailService
@@ -23,24 +35,19 @@ ASSIGNMENT_CHOICES = [
 
 OCR_CHOICES = ["auto", "docling", "vlm"]
 
+# The sample photo is baked into the container image; every container can
+# serve it, so it never depends on which container handled the page load.
 SAMPLE_IMAGE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "data", "samples", "science_homework.png"
 )
-
-
-def _encode_upload(upload_path: str | None) -> str:
-    """Base64-encode an uploaded file.
-
-    Runs on the upload request (whichever container serves it) and stores the
-    bytes in a hidden textbox, so they travel *with* the grading request.
-    Modal can route the upload POST and the grading request to different
-    containers, and the grading container cannot see the uploader's temp
-    files — passing bytes avoids the cross-container FileNotFoundError.
-    """
-    if not upload_path or not os.path.exists(upload_path):
-        return ""
-    with open(upload_path, "rb") as f:
-        return base64.b64encode(f.read()).decode("ascii")
+for _candidate in (
+    SAMPLE_IMAGE,
+    "/root/data/samples/science_homework.png",
+    os.path.join(os.getcwd(), "data", "samples", "science_homework.png"),
+):
+    if os.path.exists(_candidate):
+        SAMPLE_IMAGE = _candidate
+        break
 
 
 def _materialize_upload(upload_b64: str, suffix: str) -> str:
@@ -116,6 +123,108 @@ def grade_homework(
     return sheet_md, email_md
 
 
+class GradeRequest(BaseModel):
+    assignment_id: str
+    student_name: str
+    student_email: str
+    submission_type: str
+    typed_text: str = ""
+    upload_b64: str = ""
+    ocr_mode: str = "auto"
+
+
+api_router = APIRouter()
+
+
+@api_router.post("/api/grade")
+def api_grade(req: GradeRequest):
+    """Grade one submission. Single request/response — no server-side state,
+    so any container can serve it."""
+    try:
+        sheet_md, email_md = grade_homework(
+            req.assignment_id,
+            req.student_name,
+            req.student_email,
+            req.submission_type,
+            req.typed_text,
+            req.upload_b64,
+            req.ocr_mode,
+        )
+    except gr.Error as exc:
+        sheet_md = (
+            "### Could not grade this submission\n\n"
+            f"{exc}\n\n"
+            "_Please check your inputs and retry._"
+        )
+        email_md = "_No emails were sent._"
+    except Exception as exc:  # never leak a traceback to the page
+        sheet_md = (
+            "### Could not grade this submission\n\n"
+            f"{exc}\n\n"
+            "_Please retry._"
+        )
+        email_md = "_No emails were sent._"
+    return {"sheet_md": sheet_md, "email_md": email_md}
+
+
+@api_router.get("/api/sample-image")
+def api_sample_image():
+    return FileResponse(SAMPLE_IMAGE, media_type="image/png")
+
+
+_TOGGLE_JS = """(v) => {
+    const showTyped = v === 'Typed text';
+    document.getElementById('typed-box').style.display = showTyped ? 'block' : 'none';
+    document.getElementById('upload-box').style.display = showTyped ? 'none' : 'block';
+}"""
+
+_SAMPLE_JS = """async () => {
+    const r = await fetch('/api/sample-image');
+    if (!r.ok) return ['', '_Could not load the sample photo._'];
+    const buf = await r.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return [btoa(binary), '_Sample photo loaded — hit **Grade homework**._'];
+}"""
+
+_GRADE_JS = """async (assignment_id, student_name, student_email, submission_type, typed_text, upload_b64, ocr_mode) => {
+    // Read the selected file straight from the page: the bytes travel with
+    // this request, so grading never depends on which container served what.
+    const fileInput = document.querySelector('#upload-box input[type="file"]');
+    const file = fileInput && fileInput.files && fileInput.files[0];
+    let b64 = upload_b64 || '';
+    if (file) {
+        b64 = await new Promise((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(String(r.result).split(',')[1]);
+            r.onerror = () => reject(new Error('Could not read the selected file.'));
+            r.readAsDataURL(file);
+        });
+    }
+    try {
+        const resp = await fetch('/api/grade', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+                assignment_id: assignment_id,
+                student_name: student_name,
+                student_email: student_email,
+                submission_type: submission_type,
+                typed_text: typed_text,
+                upload_b64: b64,
+                ocr_mode: ocr_mode,
+            }),
+        });
+        const data = await resp.json();
+        return [data.sheet_md, data.email_md];
+    } catch (e) {
+        return ['### Could not grade this submission\\n\\n' + e + '\\n\\n_Please retry._',
+                '_No emails were sent._'];
+    }
+}"""
+
+
 with gr.Blocks(title="Homework Grader") as demo:
     gr.Markdown(
         """# 📝 Homework Grader
@@ -151,34 +260,34 @@ otherwise the local pipeline does its best."""
         placeholder="Q1: b\nQ2: ...",
         lines=6,
         visible=False,
+        elem_id="typed-box",
     )
     upload = gr.File(
         label="Upload file",
         file_types=["image", ".pdf"],
         type="filepath",
+        elem_id="upload-box",
     )
-    # Hidden: base64 bytes of the upload. The upload POST and the grading
-    # request can land on different Modal containers, so the file bytes ride
-    # along with the grading request instead of a temp path.
+    # Hidden: base64 bytes staged by the sample-photo button. A user-selected
+    # file is read by the Grade button's JavaScript instead.
     upload_b64 = gr.Textbox(visible=False, value="")
-    upload.upload(_encode_upload, inputs=upload, outputs=upload_b64)
+    sample_status = gr.Markdown("")
 
-    def _toggle(submission_type: str):
-        return (
-            gr.update(visible=submission_type == "Typed text"),
-            gr.update(visible=submission_type != "Typed text"),
-        )
+    # All events below are JavaScript-only (fn=None): no Gradio queue, so no
+    # per-container event state for Modal's load balancer to split up.
+    submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
 
-    submission_type.change(
-        _toggle, inputs=submission_type, outputs=[typed_text, upload]
-    )
+    with gr.Row():
+        grade_btn = gr.Button("Grade homework", variant="primary")
+        sample_btn = gr.Button("Use sample photo")
 
-    grade_btn = gr.Button("Grade homework", variant="primary")
+    sample_btn.click(None, inputs=[], outputs=[upload_b64, sample_status], js=_SAMPLE_JS)
+
     sheet_out = gr.Markdown(label="Graded sheet")
     email_out = gr.Markdown(label="Emails")
 
     grade_btn.click(
-        grade_homework,
+        None,
         inputs=[
             assignment,
             student_name,
@@ -189,21 +298,24 @@ otherwise the local pipeline does its best."""
             ocr_mode,
         ],
         outputs=[sheet_out, email_out],
+        js=_GRADE_JS,
     )
-
-    if os.path.exists(SAMPLE_IMAGE):
-        with open(SAMPLE_IMAGE, "rb") as f:
-            sample_b64 = base64.b64encode(f.read()).decode("ascii")
-        gr.Examples(
-            examples=[[SAMPLE_IMAGE, sample_b64]],
-            inputs=[upload, upload_b64],
-            label="Try the sample homework photo",
-        )
 
     gr.Markdown(
         "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
         " project. Email delivery is mocked._"
     )
 
+# The Modal deployment wires the same router in modal_app.py (registered on
+# the parent FastAPI app before Gradio is mounted).
 if __name__ == "__main__":
-    demo.launch(server_name="0.0.0.0", server_port=7860)
+    import uvicorn
+    from fastapi import FastAPI
+
+    # Compose exactly like the Modal deployment: API routes first, then the
+    # Gradio UI mounted at /. (demo.launch() rebuilds demo.app internally,
+    # so the router has to live on the parent app, not demo.app.)
+    _app = FastAPI()
+    _app.include_router(api_router)
+    gr.mount_gradio_app(_app, demo, path="/")
+    uvicorn.run(_app, host="0.0.0.0", port=7860)

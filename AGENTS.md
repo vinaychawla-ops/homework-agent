@@ -23,11 +23,13 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   graded Markdown sheet; email stays mock-only (recipients listed, nothing
   sent). Deployed on Modal via `modal_app.py` (image with Docling + baked OCR
   models, served with `gr.mount_gradio_app` on FastAPI through
-  `@modal.asgi_app()`). Uploaded files are base64-encoded on the upload
-  request into a hidden textbox, so the file bytes travel with the grading
-  request — Modal may route the upload POST and grading to different
-  containers, and the grading container cannot see the uploader's temp
-  files. Keep UI logic thin — grading stays in the core.
+  `@modal.asgi_app()`). Grading is a plain FastAPI `POST /api/grade`
+  (no Gradio queue: the queue keeps event state in container-local memory and
+  Modal's load balancer can split the queue-join POST and the event-stream
+  GET across containers, 404ing the stream). The page calls the endpoint with
+  `fetch`, sending the file's base64 bytes with the single request — no
+  cross-container filesystem dependency and no cross-request server state.
+  Keep UI logic thin — grading stays in the core.
 
 ## Conventions
 

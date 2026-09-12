@@ -16,14 +16,18 @@ import modal
 
 app = modal.App("homework-grader")
 
-# NOTE on uploads: Modal can route Gradio's upload POST and the grading
-# request to different containers, and the grading container cannot see the
+# NOTE on uploads: Modal can route Gradio's upload POST and the grading request
+# to different containers, and the grading container cannot see the
 # uploader's temp files (FileNotFoundError). A shared Modal Volume was tried,
 # but volume writes were not visible across containers; pinning
-# max_containers=1 made Modal's proxy 303/disconnect Gradio's queue calls.
-# Instead, the UI base64-encodes the upload on the upload request
-# (space/app.py::_encode_upload) and the bytes travel with the grading
-# request — no cross-container filesystem dependency at all.
+# max_containers=1 made Modal's proxy 303/disconnect Gradio's queue calls;
+# and Gradio's queue keeps event state in container-local memory, so the
+# queue-join POST and the follow-up event-stream GET landing on different
+# containers 404s the stream. The UI is therefore queue-free: grading is a
+# plain FastAPI POST /api/grade (space/app.py::api_router, mounted in
+# modal_app.py), called from the page with fetch. The file's bytes travel
+# with the single request — no cross-container filesystem dependency and no
+# cross-request server state at all.
 
 
 def warmup_docling() -> None:
@@ -65,7 +69,10 @@ def web():
 
     import gradio as gr
 
-    from app import demo
+    from app import demo, api_router
 
     fastapi_app = FastAPI()
+    # Register the grading API before mounting Gradio: parent routes are
+    # matched first, so /api/* never falls into the mounted Gradio app.
+    fastapi_app.include_router(api_router)
     return gr.mount_gradio_app(fastapi_app, demo, path="/")
