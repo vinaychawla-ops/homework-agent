@@ -42,9 +42,10 @@ def test_submission_rejects_bad_format():
         Submission("A", "a@x.edu", "math-fractions-01", "docx", "blob")
 
 
-def test_image_submission_requires_transcription():
-    with pytest.raises(ValueError, match="transcribed_text"):
-        Submission("A", "a@x.edu", "sci-water-cycle-01", "image", "/tmp/x.png")
+def test_image_submission_without_transcription_uses_ocr():
+    """No transcribed_text -> allowed; OCR runs at extract time."""
+    sub = Submission("A", "a@x.edu", "sci-water-cycle-01", "image", "/tmp/x.png")
+    assert sub.transcribed_text is None
 
 
 def test_graded_sheet_aggregates(math_assignment):

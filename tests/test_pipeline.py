@@ -52,6 +52,22 @@ def test_pipeline_image_with_transcription():
     assert len(mailer.outbox) == 2
 
 
+def test_pipeline_image_without_transcription_runs_ocr(monkeypatch):
+    monkeypatch.setattr(
+        "homework_agent.ocr.transcribe_image",
+        lambda path, mode=None: _read("science_homework_priya.txt"),
+    )
+    mailer = MockEmailService()
+    sheet, _ = run_pipeline(
+        assignments.get_assignment("sci-water-cycle-01"),
+        "Priya Nair", "priya.student@example.edu", "image",
+        sample_path("science_homework.png"),
+        email_service=mailer,
+    )
+    assert sheet.correct_count == 4
+    assert len(mailer.outbox) == 2
+
+
 def test_pipeline_emails_contain_score_and_sheet():
     mailer = MockEmailService()
     sheet, (student_msg, teacher_msg) = run_pipeline(

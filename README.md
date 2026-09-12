@@ -50,12 +50,43 @@ pip install -r requirements.txt
 python demo.py            # all samples
 python demo.py math       # typed-text math homework (all correct)
 python demo.py pdf        # PDF math homework (all wrong -> explanations)
-python demo.py image      # photo of handwritten science homework
+python demo.py image      # photo of handwritten science homework (supplied transcription)
 python demo.py science    # typed-text science homework
+python demo.py ocr        # real Docling OCR on the sample photo (see below)
 
 # run the tests
 python -m pytest tests/ -q
 ```
+
+## Handwriting OCR (Docling)
+
+Photo/scan submissions are transcribed with [Docling](https://github.com/docling-project/docling)
+(`homework_agent/ocr.py`) instead of a supplied transcription:
+
+| Path | When | Needs |
+|---|---|---|
+| Standard pipeline | Printed or scanned documents, and photos when no key is set | `pip install -r requirements.txt` (runs locally; the first run downloads OCR model assets, then works offline) |
+| VLM pipeline | Handwritten homework photos | `OPENROUTER_API_KEY` — routes through OpenRouter to Google's free `google/gemma-4-31b-it:free` model |
+
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-..."   # from https://openrouter.ai/keys
+python demo.py ocr                          # photo -> OCR -> grade -> mock email
+```
+
+Optional overrides: `OPENROUTER_MODEL` (default `google/gemma-4-31b-it:free`),
+`OCR_IMAGE_MODE` (`auto` | `docling` | `vlm`, default `auto`). Scanned PDFs
+with no usable text layer automatically fall back to Docling OCR.
+
+Notes:
+
+- The API key lives only in your environment — it is never written to the repo,
+  logs, or committed files.
+- The free OpenRouter tier is rate-limited and shared, so handwriting
+  transcription may occasionally return a "rate limit" error; the pipeline
+  retries a few times with backoff, then reports the failure instead of
+  grading garbage.
+- Passing `transcribed_text` explicitly (as `demo.py image` does) still skips
+  OCR entirely — useful for deterministic demos and tests.
 
 ## Using the ADK agents live
 
@@ -95,8 +126,6 @@ Question ids are case-insensitive. Unanswered questions are marked wrong (0 pts)
 
 ## Demo limitations (to wire up for production)
 
-- **Image OCR:** photo submissions need `transcribed_text` in demo mode. Plug a
-  vision model (e.g. Gemini vision) into `submission.parse_image()`.
 - **Email:** `MockEmailService` records to an in-memory outbox (+ optional JSONL
   log). Replace with Gmail API / SMTP for real delivery.
 - **Grading:** the engine is deterministic and offline. For richer feedback on

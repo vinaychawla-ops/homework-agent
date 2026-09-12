@@ -28,6 +28,26 @@ def test_parse_text_empty():
     assert parse_text("no answers here") == {}
 
 
+def test_parse_text_multiple_answers_on_one_line():
+    # VLM transcriptions sometimes run answers together on one line.
+    answers = parse_text("Q1: b Q2: x = 4 Q3: (c)")
+    assert answers == {"Q1": "b", "Q2": "x = 4", "Q3": "(c)"}
+
+
+def test_parse_text_single_line_vlm_style():
+    answers = parse_text(
+        "Q1: b Q2: The sun heats the puddle Q3: condensation Q4: a"
+    )
+    assert answers["Q1"] == "b"
+    assert answers["Q2"] == "The sun heats the puddle"
+    assert answers["Q3"] == "condensation"
+    assert answers["Q4"] == "a"
+
+
+def test_parse_text_noise_after_last_answer_ignored():
+    assert parse_text("Q1: 42\nsome random note") == {"Q1": "42"}
+
+
 def test_parse_pdf_sample():
     answers = parse_pdf(sample_path("math_homework.pdf"))
     assert answers["Q1"] == "2/3"
@@ -38,6 +58,30 @@ def test_parse_pdf_sample():
 def test_parse_pdf_missing_file():
     with pytest.raises(FileNotFoundError):
         parse_pdf("/nonexistent/homework.pdf")
+
+
+def test_parse_pdf_text_layer_skips_ocr(monkeypatch):
+    def _fail(path):
+        raise AssertionError("Docling OCR should not run when the text layer works")
+
+    monkeypatch.setattr("homework_agent.ocr.extract_printed", _fail)
+    answers = parse_pdf(sample_path("math_homework.pdf"))
+    assert answers["Q1"] == "2/3"
+
+
+def test_parse_pdf_scanned_falls_back_to_docling_ocr(monkeypatch, tmp_path):
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=200)
+    pdf_path = str(tmp_path / "scan.pdf")
+    with open(pdf_path, "wb") as f:
+        writer.write(f)
+
+    monkeypatch.setattr(
+        "homework_agent.ocr.extract_printed", lambda path: "Q1: 7"
+    )
+    assert parse_pdf(pdf_path) == {"Q1": "7"}
 
 
 def test_parse_image_with_transcription():
@@ -53,9 +97,44 @@ def test_parse_image_missing_file():
         parse_image("/nonexistent/photo.png", "Q1: b")
 
 
-def test_parse_image_blank_transcription_rejected():
-    with pytest.raises(ValueError, match="non-empty transcription"):
-        parse_image(sample_path("science_homework.png"), "   ")
+def test_parse_image_blank_transcription_runs_ocr(monkeypatch):
+    """Blank transcription -> Docling OCR path (mocked, no network)."""
+    monkeypatch.setattr(
+        "homework_agent.ocr.transcribe_image",
+        lambda path, mode=None: "Q1: b\nQ2: x = 4",
+    )
+    answers = parse_image(sample_path("science_homework.png"), "   ")
+    assert answers == {"Q1": "b", "Q2": "x = 4"}
+
+
+def test_parse_image_without_transcription_runs_ocr(monkeypatch):
+    monkeypatch.setattr(
+        "homework_agent.ocr.transcribe_image",
+        lambda path, mode=None: "Q3: c",
+    )
+    answers = parse_image(sample_path("science_homework.png"))
+    assert answers == {"Q3": "c"}
+
+
+def test_parse_image_supplied_transcription_skips_ocr(monkeypatch):
+    def _fail(*a, **k):
+        raise AssertionError("OCR should not run when transcription is supplied")
+
+    monkeypatch.setattr("homework_agent.ocr.transcribe_image", _fail)
+    answers = parse_image(sample_path("science_homework.png"), "Q1: b")
+    assert answers == {"Q1": "b"}
+
+
+def test_parse_image_ocr_mode_forwarded(monkeypatch):
+    seen = {}
+
+    def _fake(path, mode=None):
+        seen["mode"] = mode
+        return "Q1: a"
+
+    monkeypatch.setattr("homework_agent.ocr.transcribe_image", _fake)
+    parse_image(sample_path("science_homework.png"), ocr_mode="vlm")
+    assert seen["mode"] == "vlm"
 
 
 def test_extract_answers_dispatches_text():

@@ -73,13 +73,8 @@ class Submission:
     def __post_init__(self) -> None:
         if self.format not in VALID_FORMATS:
             raise ValueError(f"Unsupported submission format {self.format!r}; expected one of {VALID_FORMATS}")
-        if self.format == "image" and not self.transcribed_text:
-            # Real deployments plug a vision/OCR model in here; the demo requires
-            # the transcription to be supplied so grading stays deterministic.
-            raise ValueError(
-                "Image submissions require 'transcribed_text' in demo mode. "
-                "Wire an OCR/vision model into submission.extract_answers() for production."
-            )
+        # Image submissions without transcribed_text are transcribed with
+        # Docling OCR at extract time (see submission.extract_answers).
 
 
 @dataclass

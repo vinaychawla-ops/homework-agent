@@ -4,8 +4,14 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 ## Architecture
 
-- **Deterministic core** (`pipeline.py`, `grading.py`, `submission.py`, `report.py`,
-  `email_service.py`) does all real work and is fully offline. Tests target this.
+- **Deterministic core** (`pipeline.py`, `grading.py`, `submission.py`, `ocr.py`,
+  `report.py`, `email_service.py`) does all real work. Tests target this;
+  `ocr.py` is the only part that can touch the network (Docling VLM path).
+- **OCR** (`ocr.py`): Docling standard pipeline for printed/scanned docs;
+  Docling VLM pipeline via OpenRouter (`google/gemma-4-31b-it:free`) for
+  handwriting. Key comes from `OPENROUTER_API_KEY` env only; `OCR_IMAGE_MODE`
+  (`auto`|`docling`|`vlm`) overrides the path. Supplied `transcribed_text`
+  still skips OCR (deterministic demos/tests).
 - **ADK layer** (`agent.py`) is thin orchestration: `root_agent` (SequentialAgent)
   of `intake_agent` → `grading_agent` → `reporting_agent`, each exposing one
   `FunctionTool` that calls the deterministic core. Do not put grading logic in
@@ -27,18 +33,19 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 ## Running things
 
-- Venv: `~/workspace/venvs/homework-agent` (has google-adk, pytest, pypdf, sympy).
-- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 56 tests
-  at last count.
+- Venv: `~/workspace/venvs/homework-agent` (has google-adk, pytest, pypdf, sympy, docling).
+- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 80 tests
+  at last count (Docling OCR paths are stubbed in tests - no network).
 - Demo: `python demo.py [math|pdf|image|science|all]`.
 
 ## Known demo seams (production TODOs)
 
-1. `submission.parse_image()` takes caller-supplied `transcribed_text` — replace
-   with a vision/OCR call.
-2. `email_service.MockEmailService` — replace with Gmail API / SMTP sender.
-3. Short-answer grading is keyword-concept matching; an LLM judge would give
+1. `email_service.MockEmailService` — replace with Gmail API / SMTP sender.
+2. Short-answer grading is keyword-concept matching; an LLM judge would give
    richer feedback.
+3. Free-tier OpenRouter rate limits can make the VLM handwriting path flaky;
+   retries with backoff are built in, but a paid key or self-hosted VLM would
+   be steadier for production.
 
 ## Sample data
 

@@ -35,8 +35,15 @@ def intake_tool(
     submission_format: str,
     content: str,
     transcribed_text: str = "",
+    ocr_mode: str = "auto",
 ) -> Dict[str, str]:
-    """Parse a homework submission (text/pdf/image) into {question_id: answer}."""
+    """Parse a homework submission (text/pdf/image) into {question_id: answer}.
+
+    For image submissions without transcribed_text, Docling OCR runs
+    automatically: handwriting via the VLM path (OpenRouter + Gemma, needs
+    OPENROUTER_API_KEY) or the standard local pipeline. ocr_mode forces
+    "auto" | "docling" | "vlm".
+    """
     assignment: Assignment = assignments.get_assignment(assignment_id)
     sub = submission.Submission(
         student_name=student_name,
@@ -46,7 +53,7 @@ def intake_tool(
         content=content,
         transcribed_text=transcribed_text or None,
     )
-    return submission.extract_answers(sub)
+    return submission.extract_answers(sub, ocr_mode=ocr_mode)
 
 
 def grade_tool(assignment_id: str, answers: Dict[str, str]) -> Dict:
@@ -137,7 +144,10 @@ intake_agent = LlmAgent(
     instruction=(
         "You receive a homework submission. Call intake_tool with the assignment_id, "
         "student details, submission_format ('text', 'pdf', or 'image'), content "
-        "(raw text, or the file path for pdf/image), and transcribed_text for images. "
+        "(raw text, or the file path for pdf/image), and transcribed_text for images "
+        "when a human transcription is available - otherwise leave it empty and "
+        "Docling OCR transcribes the image automatically (ocr_mode 'auto' picks the "
+        "handwriting VLM when OPENROUTER_API_KEY is set, else local OCR). "
         "Return the extracted answers as JSON."
     ),
     tools=[FunctionTool(intake_tool)],

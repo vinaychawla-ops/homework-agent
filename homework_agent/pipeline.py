@@ -22,10 +22,15 @@ def run_pipeline(
     content: str,
     transcribed_text: str | None = None,
     email_service: MockEmailService | None = None,
+    ocr_mode: str | None = None,
 ) -> tuple[GradedSheet, List[EmailMessage]]:
     """Grade one homework submission and email the evaluated sheet.
 
     Returns (graded_sheet, [student_email, teacher_email]).
+
+    ``ocr_mode`` controls Docling transcription for image submissions without
+    ``transcribed_text``: "auto" (default), "docling", or "vlm". It can also
+    be set with the OCR_IMAGE_MODE environment variable.
     """
     mailer = email_service or MockEmailService()
 
@@ -37,7 +42,7 @@ def run_pipeline(
         content=content,
         transcribed_text=transcribed_text,
     )
-    answers: Dict[str, str] = submission.extract_answers(sub)
+    answers: Dict[str, str] = submission.extract_answers(sub, ocr_mode=ocr_mode)
     sheet = grading.grade_submission(assignment, answers)
     sheet = replace(sheet, student_name=student_name, student_email=student_email)
 
