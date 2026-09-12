@@ -7,8 +7,8 @@ mocked: the UI shows which messages would have been sent.
 
 from __future__ import annotations
 
+import base64
 import os
-import shutil
 import tempfile
 
 import gradio as gr
@@ -28,10 +28,34 @@ SAMPLE_IMAGE = os.path.join(
 )
 
 
-def _save_upload(upload_path: str, suffix: str) -> str:
+def _encode_upload(upload_path: str | None) -> str:
+    """Base64-encode an uploaded file.
+
+    Runs on the upload request (whichever container serves it) and stores the
+    bytes in a hidden textbox, so they travel *with* the grading request.
+    Modal can route the upload POST and the grading request to different
+    containers, and the grading container cannot see the uploader's temp
+    files — passing bytes avoids the cross-container FileNotFoundError.
+    """
+    if not upload_path or not os.path.exists(upload_path):
+        return ""
+    with open(upload_path, "rb") as f:
+        return base64.b64encode(f.read()).decode("ascii")
+
+
+def _materialize_upload(upload_b64: str, suffix: str) -> str:
+    """Write the base64 upload payload to a temp file for the pipeline."""
+    if upload_b64 and os.path.exists(upload_b64):
+        return upload_b64  # local/dev backward compat: a real path
+    try:
+        raw = base64.b64decode(upload_b64 or "")
+    except Exception:
+        raw = b""
+    if not raw:
+        raise gr.Error("Please upload a file.")
     fd, dest = tempfile.mkstemp(suffix=suffix)
-    os.close(fd)
-    shutil.copyfile(upload_path, dest)
+    with os.fdopen(fd, "wb") as f:
+        f.write(raw)
     return dest
 
 
@@ -41,7 +65,7 @@ def grade_homework(
     student_email: str,
     submission_type: str,
     typed_text: str,
-    upload: str | None,
+    upload_b64: str,
     ocr_mode: str,
 ):
     """Grade one submission and return (graded sheet markdown, email summary)."""
@@ -57,13 +81,9 @@ def grade_homework(
             raise gr.Error("Please paste the student's answers as text.")
         fmt, content = "text", typed_text
     elif submission_type == "PDF upload":
-        if not upload:
-            raise gr.Error("Please upload a PDF file.")
-        fmt, content = "pdf", _save_upload(upload, ".pdf")
+        fmt, content = "pdf", _materialize_upload(upload_b64, ".pdf")
     else:  # Photo of handwritten work
-        if not upload:
-            raise gr.Error("Please upload a photo of the homework.")
-        fmt, content = "image", _save_upload(upload, ".png")
+        fmt, content = "image", _materialize_upload(upload_b64, ".png")
 
     mailer = MockEmailService()
     try:
@@ -137,6 +157,11 @@ otherwise the local pipeline does its best."""
         file_types=["image", ".pdf"],
         type="filepath",
     )
+    # Hidden: base64 bytes of the upload. The upload POST and the grading
+    # request can land on different Modal containers, so the file bytes ride
+    # along with the grading request instead of a temp path.
+    upload_b64 = gr.Textbox(visible=False, value="")
+    upload.upload(_encode_upload, inputs=upload, outputs=upload_b64)
 
     def _toggle(submission_type: str):
         return (
@@ -160,16 +185,18 @@ otherwise the local pipeline does its best."""
             student_email,
             submission_type,
             typed_text,
-            upload,
+            upload_b64,
             ocr_mode,
         ],
         outputs=[sheet_out, email_out],
     )
 
     if os.path.exists(SAMPLE_IMAGE):
+        with open(SAMPLE_IMAGE, "rb") as f:
+            sample_b64 = base64.b64encode(f.read()).decode("ascii")
         gr.Examples(
-            examples=[[SAMPLE_IMAGE]],
-            inputs=upload,
+            examples=[[SAMPLE_IMAGE, sample_b64]],
+            inputs=[upload, upload_b64],
             label="Try the sample homework photo",
         )
 

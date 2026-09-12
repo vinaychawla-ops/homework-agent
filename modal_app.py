@@ -16,12 +16,14 @@ import modal
 
 app = modal.App("homework-grader")
 
-# Shared volume for Gradio uploads. Modal can route the upload POST and the
-# grading request to different containers; without a shared temp dir the
-# grading container cannot see the uploaded file (FileNotFoundError).
-uploads_volume = modal.Volume.from_name(
-    "homework-grader-uploads", create_if_missing=True
-)
+# NOTE on uploads: Modal can route Gradio's upload POST and the grading
+# request to different containers, and the grading container cannot see the
+# uploader's temp files (FileNotFoundError). A shared Modal Volume was tried,
+# but volume writes were not visible across containers; pinning
+# max_containers=1 made Modal's proxy 303/disconnect Gradio's queue calls.
+# Instead, the UI base64-encodes the upload on the upload request
+# (space/app.py::_encode_upload) and the bytes travel with the grading
+# request — no cross-container filesystem dependency at all.
 
 
 def warmup_docling() -> None:
@@ -53,8 +55,6 @@ image = (
     memory=8192,
     timeout=900,
     secrets=[modal.Secret.from_name("openrouter-api-key")],
-    volumes={"/gradio-tmp": uploads_volume},
-    env={"GRADIO_TEMP_DIR": "/gradio-tmp"},
 )
 @modal.asgi_app()
 def web():
