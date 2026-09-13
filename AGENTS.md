@@ -18,9 +18,13 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   agent prompts; prompts only orchestrate and narrate.
 - **Demo** (`demo.py`) calls `pipeline.run_pipeline` directly — no API key, same
   logic the agents use.
-- **Browser UI** (`space/app.py`): Gradio `Blocks` UI that calls
-  `pipeline.run_pipeline` for typed/PDF/image submissions and renders the
-  graded Markdown sheet; email is real delivery when Gmail credentials are
+- **Browser UI** (`space/app.py`): Gradio `Blocks` UI with two tabs. The
+  *Grade homework* tab calls `pipeline.run_pipeline` for typed/PDF/image
+  submissions and renders the graded Markdown sheet; the *Create assignment*
+  tab lets a teacher upload an answer key (image, PDF, .docx, .txt) or paste
+  one, reviews the parsed key, and saves it via
+  `assignments.save_assignment` (persisted under `HOMEWORK_ASSIGNMENTS_DIR`;
+  on Modal this is the `homework-assignments` volume). Email is real delivery when Gmail credentials are
   configured (see below), otherwise the mock mailer (recipients listed,
   nothing sent). Deployed on Modal via `modal_app.py` (image with Docling +
   baked OCR models, served with `gr.mount_gradio_app` on FastAPI through
@@ -41,6 +45,13 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   `grading._GRADERS`, add tests in `tests/test_grading.py`.
 - New subjects: extend `models.VALID_SUBJECTS` (currently `math`, `science` only —
   this is a product constraint, keep it).
+- Teacher-uploaded assignments: `answer_key.py` parses/uploads keys
+  (`extract_key_text` per file type, `parse_key_text` for the `Q1 || answer`
+  format, `infer_question_type` when `[type]` is omitted);
+  `assignments.build_assignment` + `save_assignment` persist them as JSON under
+  `HOMEWORK_ASSIGNMENTS_DIR`, and `all_assignments()` (used by
+  `get/resolve/detect_assignment`) merges them with the built-ins. Never put
+  grading logic in the UI — the Create tab only parses, previews, and saves.
 - Email: `SmtpEmailService` sends real email via Gmail SMTP (needs
   `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` env); `make_email_service()` picks it
   when both are set, otherwise falls back to `MockEmailService` so local
@@ -55,9 +66,8 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 - Venv: `~/workspace/venvs/homework-agent` (has google-adk, pytest, pypdf, sympy,
   docling, gradio, modal).
-- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 86 tests
-  at last count (Docling OCR paths are stubbed in tests - no network).
-- Demo: `python demo.py [math|pdf|image|science|all]`.
+- Tests: `python -m pytest tests/ -q` from repo root. Keep the suite green; 142 tests
+  at last count (Docling OCR paths are stubbed in tests - no network).- Demo: `python demo.py [math|pdf|image|science|all]`.
 - Gradio UI: `python space/app.py` (needs `gradio>=5.0`).
 - Modal deploy: `modal deploy modal_app.py` from repo root with
   `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` set (from modal.com/settings/tokens).

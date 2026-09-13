@@ -28,12 +28,12 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from homework_agent import assignments, email_service, pipeline, report, submission
+from homework_agent import answer_key, assignments, email_service, pipeline, report, submission
 from homework_agent.models import Submission
 
 ASSIGNMENT_HINT = "Available: " + ", ".join(
     f"{a.title} ({a.id})" for a in assignments.ASSIGNMENTS.values()
-)
+) + "; teacher-uploaded assignments work too — just type the title"
 
 OCR_CHOICES = ["auto", "docling", "vlm"]
 
@@ -219,6 +219,110 @@ def api_sample_image():
     return FileResponse(SAMPLE_IMAGE, media_type="image/png")
 
 
+class ReadKeyRequest(BaseModel):
+    filename: str = ""
+    file_b64: str = ""
+
+
+@api_router.post("/api/answer-key/read")
+def api_read_key(req: ReadKeyRequest):
+    """Transcribe an uploaded answer key and return it in the editable format.
+
+    Accepts an image (photo/scan, handwritten or printed), PDF, .docx, or
+    plain text. The teacher reviews the result in the UI before creating
+    the assignment, so transcription mistakes can be fixed there.
+    """
+    try:
+        suffix = os.path.splitext(req.filename or "")[1].lower()
+        if not suffix.startswith("."):
+            suffix = ".bin"
+        path = _materialize_upload(req.file_b64, suffix)
+        try:
+            text = answer_key.extract_key_text(path, req.filename)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        headers, questions = answer_key.parse_key_text(text)
+        if not questions:
+            return {
+                "error": "No 'Q1: <answer>' lines found in the answer key. "
+                "Please check the file and try again."
+            }
+        return {
+            "key_text": answer_key.render_key_text(headers, questions),
+            "question_count": len(questions),
+        }
+    except gr.Error as exc:
+        return {"error": str(exc)}
+    except Exception as exc:  # never leak a traceback to the page
+        return {"error": f"Could not read the answer key: {exc}"}
+
+
+class CreateAssignmentRequest(BaseModel):
+    title: str = ""
+    subject: str = "math"
+    teacher_name: str = ""
+    teacher_email: str = ""
+    key_text: str = ""
+
+
+@api_router.post("/api/assignments")
+def api_create_assignment(req: CreateAssignmentRequest):
+    """Create a teacher-uploaded assignment from answer-key text."""
+    try:
+        headers, questions = answer_key.parse_key_text(req.key_text or "")
+        title = req.title.strip() or headers.get("title", "").strip()
+        subject = (req.subject or headers.get("subject") or "math").strip().lower()
+        teacher_name = req.teacher_name.strip()
+        teacher_email = req.teacher_email.strip()
+        if not teacher_name and headers.get("teacher"):
+            teacher_name, header_email = answer_key.parse_teacher_header(
+                headers["teacher"]
+            )
+            teacher_email = teacher_email or header_email
+        merged = {"title": title, "subject": subject}
+        errors = answer_key.validate_key(merged, questions, subject=subject)
+        if title and assignments.title_in_use(title):
+            errors.append(f"An assignment titled {title!r} already exists.")
+        if errors:
+            return {"ok": False, "errors": errors}
+        assignment = assignments.build_assignment(
+            questions,
+            title=title,
+            subject=subject,
+            teacher_name=teacher_name,
+            teacher_email=teacher_email,
+        )
+        assignments.save_assignment(assignment)
+        return {
+            "ok": True,
+            "id": assignment.id,
+            "title": assignment.title,
+            "question_count": len(questions),
+        }
+    except Exception as exc:  # never leak a traceback to the page
+        return {"ok": False, "errors": [f"Could not create the assignment: {exc}"]}
+
+
+@api_router.get("/api/assignments")
+def api_list_assignments():
+    """List built-in plus teacher-uploaded assignments."""
+    known = assignments.all_assignments()
+    return {
+        "assignments": [
+            {
+                "id": a.id,
+                "title": a.title,
+                "subject": a.subject,
+                "questions": len(a.questions),
+            }
+            for a in known.values()
+        ]
+    }
+
+
 _TOGGLE_JS = """(v) => {
     const showTyped = v === 'Typed text';
     document.getElementById('typed-box').style.display = showTyped ? 'block' : 'none';
@@ -273,6 +377,38 @@ _HOOK_JS = """() => {
         r.onerror = () => { window.__hg_upload_b64 = ''; };
         r.readAsDataURL(f);
     }, true);
+    // Answer-key upload (Create assignment tab): same capture pattern, its
+    // own stash plus the original filename for format detection.
+    window.__hg_key_b64 = '';
+    window.__hg_key_name = '';
+    document.addEventListener('change', (e) => {
+        const t = e.target;
+        if (!t || !t.matches || !t.matches('input[type="file"]')) return;
+        if (!t.closest('#key-upload-box')) return;
+        const f = t.files && t.files[0];
+        window.__hg_key_name = (f && f.name) || '';
+        if (!f) { window.__hg_key_b64 = ''; return; }
+        const r = new FileReader();
+        r.onload = () => {
+            window.__hg_key_b64 = String(r.result).split(',')[1] || '';
+        };
+        r.onerror = () => { window.__hg_key_b64 = ''; };
+        r.readAsDataURL(f);
+    }, true);
+    // Assignment list on the Create tab: refreshed after each creation too.
+    const __hg_render_list = async () => {
+        const el = document.getElementById('assignment-list');
+        if (!el) return;
+        try {
+            const r = await fetch('/api/assignments');
+            const data = await r.json();
+            const items = (data && data.assignments) || [];
+            el.innerHTML = '<b>Available assignments</b> (' + items.length + '): ' +
+                items.map((a) => a.title + ' (' + a.questions + ' questions)').join(' · ');
+        } catch (e) { /* leave as-is */ }
+    };
+    __hg_render_list();
+    window.__hg_render_list = __hg_render_list;
 }"""
 
 _GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email, submission_type, typed_text, ocr_mode) => {
@@ -351,6 +487,79 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email,
     }
 }"""
 
+_READ_KEY_JS = """async () => {
+    const statusEl = document.getElementById('create-status');
+    const setStatus = (t) => { if (statusEl) statusEl.innerHTML = t; };
+    setStatus('_Reading the answer key…_');
+    try {
+        const b64 = (typeof window !== 'undefined' && window.__hg_key_b64) || '';
+        const name = (typeof window !== 'undefined' && window.__hg_key_name) || '';
+        if (!b64) return 'Please choose an answer-key file first.';
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
+        let resp;
+        try {
+            resp = await fetch('/api/answer-key/read', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({filename: name, file_b64: b64}),
+                signal: controller.signal,
+            });
+        } catch (e) {
+            if (e && e.name === 'AbortError') return 'The request timed out after 3 minutes. Please retry.';
+            throw e;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (!resp.ok) return 'The server returned HTTP ' + resp.status + '. Please retry.';
+        const data = await resp.json();
+        if (data && data.error) return data.error;
+        // Fill the editable key box via the DOM (kept out of outputs so a
+        // failed read never wipes what the teacher already typed).
+        const ta = document.querySelector('#key-text-box textarea');
+        if (ta && data && data.key_text) {
+            ta.value = data.key_text;
+            ta.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+        const n = (data && data.question_count) || 0;
+        return '_Read ' + n + ' question(s). Review the key above — fix anything misread — then press **Create assignment**._';
+    } catch (e) {
+        return e && e.message ? e.message : String(e);
+    }
+}"""
+
+_CREATE_JS = """async (title, subject, teacher_name, teacher_email, key_text) => {
+    const s = (v, d) => (typeof v === 'string' && v !== null ? v : (d || ''));
+    title = s(title); subject = s(subject, 'math'); teacher_name = s(teacher_name);
+    teacher_email = s(teacher_email); key_text = s(key_text);
+    if (!key_text.trim()) return 'Please read an answer-key file or paste the key above first.';
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 60000);
+        let resp;
+        try {
+            resp = await fetch('/api/assignments', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({title: title, subject: subject, teacher_name: teacher_name, teacher_email: teacher_email, key_text: key_text}),
+                signal: controller.signal,
+            });
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (!resp.ok) return 'The server returned HTTP ' + resp.status + '. Please retry.';
+        const data = await resp.json();
+        if (data && data.ok) {
+            if (typeof window !== 'undefined' && window.__hg_render_list) window.__hg_render_list();
+            return 'Assignment **' + data.title + '** created with ' + data.question_count + ' question(s). Students can now submit against it by name.';
+        }
+        const errs = (data && data.errors) || ['Unknown error.'];
+        return 'Could not create the assignment:\\n\\n' + errs.map((e) => '- ' + e).join('\\n');
+    } catch (e) {
+        return e && e.message ? e.message : String(e);
+    }
+}"""
+
 
 with gr.Blocks(title="Homework Grader") as demo:
     # The typed-answers box is hidden with CSS (not visible=False) so it stays
@@ -368,82 +577,140 @@ For handwriting, pick the **vlm** mode to transcribe with Google Gemma via
 OpenRouter (needs an `OPENROUTER_API_KEY` secret on the deployment) —
 otherwise the local pipeline does its best."""
     )
-    with gr.Row():
-        assignment = gr.Textbox(
-            label="Assignment (name or ID) — optional, auto-detected if blank or unknown",
-            value="",
-            placeholder="e.g. Rainbows — leave blank and the app figures it out",
-            elem_id="assignment-box",
+    with gr.Tab("Grade homework"):
+        with gr.Row():
+            assignment = gr.Textbox(
+                label="Assignment (name or ID) — optional, auto-detected if blank or unknown",
+                value="",
+                placeholder="e.g. Rainbows — leave blank and the app figures it out",
+                elem_id="assignment-box",
+            )
+            ocr_mode = gr.Radio(
+                choices=OCR_CHOICES, value="auto", label="OCR mode (images only)"
+            )
+        gr.Markdown("_" + ASSIGNMENT_HINT + "_")
+        with gr.Row():
+            student_name = gr.Textbox(label="Student name", placeholder="Priya Nair")
+            student_email = gr.Textbox(
+                label="Student email", placeholder="priya.student@example.edu"
+            )
+            teacher_email = gr.Textbox(
+                label="Teacher email", placeholder="ms.rivera@school.edu"
+            )
+        submission_type = gr.Radio(
+            choices=["Typed text", "PDF upload", "Photo of handwritten work"],
+            value="Photo of handwritten work",
+            label="Submission type",
         )
-        ocr_mode = gr.Radio(
-            choices=OCR_CHOICES, value="auto", label="OCR mode (images only)"
+        typed_text = gr.Textbox(
+            label="Typed answers",
+            placeholder="Q1: b\nQ2: ...",
+            lines=6,
+            elem_id="typed-box",
         )
-    gr.Markdown("_" + ASSIGNMENT_HINT + "_")
-    with gr.Row():
-        student_name = gr.Textbox(label="Student name", placeholder="Priya Nair")
-        student_email = gr.Textbox(
-            label="Student email", placeholder="priya.student@example.edu"
+        upload = gr.File(
+            label="Upload file",
+            file_types=["image", ".pdf"],
+            type="filepath",
+            elem_id="upload-box",
         )
-        teacher_email = gr.Textbox(
-            label="Teacher email", placeholder="ms.rivera@school.edu"
+        # Hidden: base64 bytes staged by the sample-photo button. A user-selected
+        # file is read by the Grade button's JavaScript instead.
+        sample_status = gr.Markdown("")
+
+        # All events below are JavaScript-only (fn=None): no Gradio queue, so no
+        # per-container event state for Modal's load balancer to split up.
+        # Page-load hook: captures upload bytes at selection time (see _HOOK_JS).
+        demo.load(None, js=_HOOK_JS)
+        submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
+
+        with gr.Row():
+            grade_btn = gr.Button("Grade homework", variant="primary")
+            sample_btn = gr.Button("Use sample photo")
+        grade_status = gr.Markdown("", elem_id="grade-status")
+
+        sample_btn.click(None, inputs=[], outputs=[sample_status], js=_SAMPLE_JS)
+
+        sheet_out = gr.Markdown(label="Graded sheet")
+        email_out = gr.Markdown(label="Emails")
+
+        grade_btn.click(
+            None,
+            inputs=[
+                assignment,
+                student_name,
+                student_email,
+                teacher_email,
+                submission_type,
+                typed_text,
+                ocr_mode,
+            ],
+            outputs=[sheet_out, email_out],
+            js=_GRADE_JS,
         )
-    submission_type = gr.Radio(
-        choices=["Typed text", "PDF upload", "Photo of handwritten work"],
-        value="Photo of handwritten work",
-        label="Submission type",
-    )
-    typed_text = gr.Textbox(
-        label="Typed answers",
-        placeholder="Q1: b\nQ2: ...",
-        lines=6,
-        elem_id="typed-box",
-    )
-    upload = gr.File(
-        label="Upload file",
-        file_types=["image", ".pdf"],
-        type="filepath",
-        elem_id="upload-box",
-    )
-    # Hidden: base64 bytes staged by the sample-photo button. A user-selected
-    # file is read by the Grade button's JavaScript instead.
-    sample_status = gr.Markdown("")
 
-    # All events below are JavaScript-only (fn=None): no Gradio queue, so no
-    # per-container event state for Modal's load balancer to split up.
-    # Page-load hook: captures upload bytes at selection time (see _HOOK_JS).
-    demo.load(None, js=_HOOK_JS)
-    submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
+        gr.Markdown(
+            "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
+            " project. Email delivery is live when Gmail credentials are configured,"
+            " otherwise mocked._"
+        )
 
-    with gr.Row():
-        grade_btn = gr.Button("Grade homework", variant="primary")
-        sample_btn = gr.Button("Use sample photo")
-    grade_status = gr.Markdown("", elem_id="grade-status")
+    with gr.Tab("Create assignment"):
+        gr.Markdown(
+            "### ➕ Create an assignment from an answer key\n"
+            "Upload the answer key as a **photo/scan** (handwritten or printed), "
+            "**PDF**, **Word (.docx)**, or **plain text** — or paste it below. "
+            "The key is read and shown for review; fix anything misread, then "
+            "create the assignment. Students can then submit against it by name, "
+            "and it is graded against your key."
+        )
+        with gr.Row():
+            new_title = gr.Textbox(
+                label="Assignment title", placeholder="e.g. Fractions Quiz"
+            )
+            new_subject = gr.Dropdown(
+                choices=["math", "science"], value="math", label="Subject"
+            )
+        with gr.Row():
+            new_teacher_name = gr.Textbox(
+                label="Teacher name", placeholder="Jane Doe"
+            )
+            new_teacher_email = gr.Textbox(
+                label="Teacher email", placeholder="jane@school.edu"
+            )
+        key_upload = gr.File(
+            label="Upload answer key (image, PDF, .docx, .txt)",
+            file_types=["image", ".pdf", ".docx", ".txt", ".md"],
+            type="filepath",
+            elem_id="key-upload-box",
+        )
+        read_key_btn = gr.Button("Read answer key")
+        key_text = gr.Textbox(
+            label="Answer key — one question per line (review and edit)",
+            placeholder="Q1 [numeric] || 3/4\nQ2 [multiple_choice] || b",
+            lines=12,
+            elem_id="key-text-box",
+        )
+        gr.Markdown(
+            "Format per line: `Q1 [type] optional prompt || answer || explanation "
+            "|| points: 2 || concepts: a, b`. `[type]` is one of `numeric`, "
+            "`multiple_choice`, `expression`, `short_answer` — leave it out and "
+            "the type is inferred from the answer (shown back in brackets for "
+            "you to correct). Lines starting with `#` are ignored; `Title:`, "
+            "`Subject:`, and `Teacher: Name <email>` header lines are optional."
+        )
+        create_btn = gr.Button("Create assignment", variant="primary")
+        create_status = gr.Markdown("", elem_id="create-status")
+        assignment_list = gr.Markdown("", elem_id="assignment-list")
 
-    sample_btn.click(None, inputs=[], outputs=[sample_status], js=_SAMPLE_JS)
-
-    sheet_out = gr.Markdown(label="Graded sheet")
-    email_out = gr.Markdown(label="Emails")
-
-    grade_btn.click(
-        None,
-        inputs=[
-            assignment,
-            student_name,
-            student_email,
-            teacher_email,
-            submission_type,
-            typed_text,
-            ocr_mode,
-        ],
-        outputs=[sheet_out, email_out],
-        js=_GRADE_JS,
-    )
-
-    gr.Markdown(
-        "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
-        " project. Email delivery is live when Gmail credentials are configured,"
-        " otherwise mocked._"
-    )
+        # JavaScript-only (fn=None): no Gradio queue, same as the Grade tab.
+        read_key_btn.click(None, inputs=[], outputs=[create_status], js=_READ_KEY_JS)
+        create_btn.click(
+            None,
+            inputs=[new_title, new_subject, new_teacher_name, new_teacher_email, key_text],
+            outputs=[create_status],
+            js=_CREATE_JS,
+        )
 
 # The Modal deployment wires the same router in modal_app.py (registered on
 # the parent FastAPI app before Gradio is mounted).

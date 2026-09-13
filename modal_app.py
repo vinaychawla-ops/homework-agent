@@ -69,12 +69,20 @@ image = (
     memory=8192,
     timeout=900,
     secrets=[modal.Secret.from_name("openrouter-api-key")],
+    volumes={"/root/data/assignments": modal.Volume.from_name(
+        "homework-assignments", create_if_missing=True
+    )},
 )
 @modal.asgi_app()
 def web():
+    import os
     import sys
 
     sys.path.insert(0, "/root")
+    # Teacher-uploaded assignments persist on the volume across restarts.
+    os.environ.setdefault(
+        "HOMEWORK_ASSIGNMENTS_DIR", "/root/data/assignments"
+    )
     from fastapi import FastAPI
 
     import gradio as gr

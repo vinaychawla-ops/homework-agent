@@ -1,7 +1,9 @@
 """Sample Math and Science assignments with answer keys (demo data)."""
 
+import json
+import os
 import re
-from typing import Optional
+from typing import Dict, List, Optional
 
 from .models import Assignment, Question
 
@@ -137,9 +139,12 @@ ASSIGNMENTS = {
 
 def get_assignment(assignment_id: str) -> Assignment:
     try:
-        return ASSIGNMENTS[assignment_id]
+        return all_assignments()[assignment_id]
     except KeyError:
-        raise KeyError(f"Unknown assignment {assignment_id!r}. Available: {sorted(ASSIGNMENTS)}")
+        raise KeyError(
+            f"Unknown assignment {assignment_id!r}. "
+            f"Available: {sorted(all_assignments())}"
+        )
 
 
 def resolve_assignment(ref: str) -> Assignment:
@@ -152,13 +157,14 @@ def resolve_assignment(ref: str) -> Assignment:
     key = (ref or "").strip().lower()
     if not key:
         raise KeyError("No assignment was named.")
-    for assignment in ASSIGNMENTS.values():
+    known = all_assignments()
+    for assignment in known.values():
         if key == assignment.id.lower() or key == assignment.title.lower():
             return assignment
-    partial = [a for a in ASSIGNMENTS.values() if key in a.title.lower()]
+    partial = [a for a in known.values() if key in a.title.lower()]
     if len(partial) == 1:
         return partial[0]
-    available = ", ".join(f"{a.title} ({a.id})" for a in ASSIGNMENTS.values())
+    available = ", ".join(f"{a.title} ({a.id})" for a in known.values())
     raise KeyError(f"Unknown assignment {ref!r}. Available: {available}")
 
 
@@ -182,7 +188,7 @@ def detect_assignment(text: str) -> Optional[Assignment]:
     if not haystack.strip():
         return None
     scored = []
-    for assignment in ASSIGNMENTS.values():
+    for assignment in all_assignments().values():
         signals = set()
         for question in assignment.questions:
             signals.update(_signal_words(question.prompt))
@@ -202,3 +208,167 @@ def detect_assignment(text: str) -> Optional[Assignment]:
     if best_score >= 2.0 and best_score > runner_up_score:
         return best
     return None
+
+
+# ---------------------------------------------------------------------------
+# Teacher-uploaded assignments (persisted as JSON)
+# ---------------------------------------------------------------------------
+
+#: Directory holding teacher-uploaded assignments as ``<id>.json`` files.
+#: Override with the ``HOMEWORK_ASSIGNMENTS_DIR`` environment variable (the
+#: Modal deployment points it at a persistent volume).
+ASSIGNMENTS_DIR_ENV = "HOMEWORK_ASSIGNMENTS_DIR"
+
+
+def assignments_dir() -> str:
+    return os.environ.get(
+        ASSIGNMENTS_DIR_ENV,
+        os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "assignments"),
+    )
+
+
+def question_to_dict(question: Question) -> Dict:
+    return {
+        "id": question.id,
+        "subject": question.subject,
+        "prompt": question.prompt,
+        "question_type": question.question_type,
+        "correct_answer": question.correct_answer,
+        "correct_explanation": question.correct_explanation,
+        "key_concepts": list(question.key_concepts),
+        "points": question.points,
+        "tolerance": question.tolerance,
+        "pass_threshold": question.pass_threshold,
+    }
+
+
+def question_from_dict(data: Dict) -> Question:
+    return Question(
+        id=data["id"],
+        subject=data["subject"],
+        prompt=data.get("prompt", ""),
+        question_type=data["question_type"],
+        correct_answer=data["correct_answer"],
+        correct_explanation=data.get(
+            "correct_explanation", f"The correct answer is {data['correct_answer']}."
+        ),
+        key_concepts=list(data.get("key_concepts") or []),
+        points=float(data.get("points", 1.0)),
+        tolerance=float(data.get("tolerance", 1e-6)),
+        pass_threshold=float(data.get("pass_threshold", 0.7)),
+    )
+
+
+def assignment_to_dict(assignment: Assignment) -> Dict:
+    return {
+        "id": assignment.id,
+        "title": assignment.title,
+        "subject": assignment.subject,
+        "teacher_name": assignment.teacher_name,
+        "teacher_email": assignment.teacher_email,
+        "questions": [question_to_dict(q) for q in assignment.questions],
+    }
+
+
+def assignment_from_dict(data: Dict) -> Assignment:
+    return Assignment(
+        id=data["id"],
+        title=data["title"],
+        subject=data["subject"],
+        teacher_name=data.get("teacher_name", ""),
+        teacher_email=data.get("teacher_email", ""),
+        questions=[question_from_dict(q) for q in data["questions"]],
+    )
+
+
+def load_custom_assignments() -> Dict[str, Assignment]:
+    """Load teacher-uploaded assignments from the JSON directory."""
+    custom: Dict[str, Assignment] = {}
+    directory = assignments_dir()
+    if not os.path.isdir(directory):
+        return custom
+    for filename in sorted(os.listdir(directory)):
+        if not filename.endswith(".json"):
+            continue
+        path = os.path.join(directory, filename)
+        try:
+            with open(path, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            assignment = assignment_from_dict(data)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue  # skip corrupt files; built-ins keep working
+        custom[assignment.id] = assignment
+    return custom
+
+
+def all_assignments() -> Dict[str, Assignment]:
+    """Built-in plus teacher-uploaded assignments (custom ids win on clash)."""
+    return {**ASSIGNMENTS, **load_custom_assignments()}
+
+
+def save_assignment(assignment: Assignment) -> str:
+    """Persist a teacher-uploaded assignment as JSON; returns its file path."""
+    directory = assignments_dir()
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{assignment.id}.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(assignment_to_dict(assignment), fh, indent=2)
+    return path
+
+
+def slugify(title: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", title.strip().lower()).strip("-")
+    return slug or "assignment"
+
+
+def unique_assignment_id(title: str) -> str:
+    """Generate a ``custom-<slug>`` id not used by any known assignment."""
+    known = all_assignments()
+    base = f"custom-{slugify(title)}"
+    candidate = base
+    counter = 2
+    while candidate in known:
+        candidate = f"{base}-{counter}"
+        counter += 1
+    return candidate
+
+
+def title_in_use(title: str) -> bool:
+    wanted = title.strip().lower()
+    return any(a.title.strip().lower() == wanted for a in all_assignments().values())
+
+
+def build_assignment(
+    key_questions: List,
+    *,
+    title: str,
+    subject: str,
+    teacher_name: str = "",
+    teacher_email: str = "",
+) -> Assignment:
+    """Build an Assignment from parsed answer-key questions."""
+    from .answer_key import KeyQuestion  # deferred: avoids a circular import
+
+    questions: List[Question] = []
+    for kq in key_questions:
+        assert isinstance(kq, KeyQuestion)
+        questions.append(
+            Question(
+                id=kq.qid,
+                subject=subject,
+                prompt=kq.prompt,
+                question_type=kq.question_type,
+                correct_answer=kq.answer,
+                correct_explanation=kq.explanation,
+                key_concepts=list(kq.key_concepts),
+                points=kq.points,
+            )
+        )
+    return Assignment(
+        id=unique_assignment_id(title),
+        title=title.strip(),
+        subject=subject,
+        teacher_name=teacher_name.strip(),
+        teacher_email=teacher_email.strip(),
+        questions=questions,
+    )

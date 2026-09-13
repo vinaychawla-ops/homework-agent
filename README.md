@@ -179,18 +179,39 @@ Question ids are case-insensitive. Unanswered questions are marked wrong (0 pts)
 
 ## Adding your own assignment
 
-```python
-from homework_agent.models import Assignment, Question
-from homework_agent import assignments
+**Web UI (recommended):** open the **Create assignment** tab, upload the
+answer key as a photo/scan, PDF, Word (.docx), or text file — or paste it —
+review the parsed key, and press *Create assignment*. The assignment is saved
+as JSON (persisted across restarts; on Modal it lives on the
+`homework-assignments` volume) and students can submit against it by title.
 
-a = Assignment(
-    id="math-quiz-02", title="Quiz 2", subject="math",
-    teacher_name="Ms. Rivera", teacher_email="rivera.teacher@example.edu",
-    questions=[Question(id="Q1", subject="math", prompt="...",
-                        question_type="numeric", correct_answer="42",
-                        correct_explanation="...")],
-)
-assignments.ASSIGNMENTS[a.id] = a
+Answer-key format (one question per line):
+
+```
+Title: Fractions Quiz
+Subject: math
+Teacher: Jane Doe <jane@school.edu>
+
+Q1 [numeric] Simplify 6/8 || 3/4 || Divide top and bottom by 2
+Q2 [multiple_choice] || b
+```
+
+`[type]` is optional — it is inferred from the answer when omitted
+(`b` → multiple_choice, `3/4` → numeric, `x^2+1` → expression, text →
+short_answer) and shown back for correction. Segments after `||` are the
+answer, an optional explanation, and optional `points:` / `concepts:` extras.
+
+**Code:** build an `Assignment` and persist it:
+
+```python
+from homework_agent import assignments
+from homework_agent.answer_key import parse_key_text
+
+headers, key_questions = parse_key_text(open("key.txt").read())
+a = assignments.build_assignment(key_questions, title="Quiz 2",
+                                 subject="math", teacher_name="...",
+                                 teacher_email="...")
+assignments.save_assignment(a)   # stored under HOMEWORK_ASSIGNMENTS_DIR
 ```
 
 Then grade with `pipeline.run_pipeline(a, student_name, student_email, "text", "Q1: 42")`.
