@@ -13,7 +13,8 @@ evaluated sheet back to the student and the teacher.
    - **Wrong** → marked wrong, with an explanation of *why the student's answer is
      incorrect* plus an *explanation of the correct answer*.
 4. The evaluated sheet is emailed to **both the student and the teacher**
-   (mock email service in this demo; swap in a real provider later).
+   (`SmtpEmailService` via Gmail SMTP when `GMAIL_SENDER` + `GMAIL_APP_PASSWORD`
+   are set; otherwise a mock email service that only records to an outbox).
 
 **Subjects:** Math and Science only. Open-ended short answers are supported via a
 key-concept rubric with partial credit.
@@ -168,8 +169,11 @@ Question ids are case-insensitive. Unanswered questions are marked wrong (0 pts)
 
 ## Demo limitations (to wire up for production)
 
-- **Email:** `MockEmailService` records to an in-memory outbox (+ optional JSONL
-  log). Replace with Gmail API / SMTP for real delivery.
+- **Email:** `SmtpEmailService` sends real email via Gmail SMTP (needs
+  `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` env vars); without them,
+  `make_email_service()` falls back to `MockEmailService`, which records to an
+  in-memory outbox (+ optional JSONL log). On Modal, the credentials live in
+  the optional `gmail-smtp` secret.
 - **Grading:** the engine is deterministic and offline. For richer feedback on
   open-ended answers, route `short_answer` grading through an LLM judge.
 

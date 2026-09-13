@@ -20,9 +20,10 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   logic the agents use.
 - **Browser UI** (`space/app.py`): Gradio `Blocks` UI that calls
   `pipeline.run_pipeline` for typed/PDF/image submissions and renders the
-  graded Markdown sheet; email stays mock-only (recipients listed, nothing
-  sent). Deployed on Modal via `modal_app.py` (image with Docling + baked OCR
-  models, served with `gr.mount_gradio_app` on FastAPI through
+  graded Markdown sheet; email is real delivery when Gmail credentials are
+  configured (see below), otherwise the mock mailer (recipients listed,
+  nothing sent). Deployed on Modal via `modal_app.py` (image with Docling +
+  baked OCR models, served with `gr.mount_gradio_app` on FastAPI through
   `@modal.asgi_app()`). Grading is a plain FastAPI `POST /api/grade`
   (no Gradio queue: the queue keeps event state in container-local memory and
   Modal's load balancer can split the queue-join POST and the event-stream
@@ -40,8 +41,15 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   `grading._GRADERS`, add tests in `tests/test_grading.py`.
 - New subjects: extend `models.VALID_SUBJECTS` (currently `math`, `science` only —
   this is a product constraint, keep it).
-- Email is mock-only. `MockEmailService.outbox` is the assertion point in tests;
-  `sent_to()` filters by recipient. Real delivery is an explicit future step.
+- Email: `SmtpEmailService` sends real email via Gmail SMTP (needs
+  `GMAIL_SENDER` + `GMAIL_APP_PASSWORD` env); `make_email_service()` picks it
+  when both are set, otherwise falls back to `MockEmailService` so local
+  dev/tests never send. `MockEmailService.outbox` is the assertion point in
+  tests; `sent_to()` filters by recipient. `run_pipeline(teacher_email=...)`
+  overrides the assignment's teacher address — the web UI collects the
+  teacher's email on the form and every grading goes to both student and
+  teacher. On Modal, the Gmail credentials live in the `gmail-smtp` secret
+  (optional; skipped when absent).
 
 ## Running things
 
@@ -60,7 +68,8 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 ## Known demo seams (production TODOs)
 
-1. `email_service.MockEmailService` — replace with Gmail API / SMTP sender.
+1. `email_service.SmtpEmailService` — live when the `gmail-smtp` Modal secret
+   exists; pending until the dedicated sender Gmail account is accessible.
 2. Short-answer grading is keyword-concept matching; an LLM judge would give
    richer feedback.
 3. Free-tier OpenRouter rate limits can make the VLM handwriting path flaky;
