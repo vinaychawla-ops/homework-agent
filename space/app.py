@@ -272,12 +272,12 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
 }"""
 
 
-with gr.Blocks(
-    title="Homework Grader",
+with gr.Blocks(title="Homework Grader") as demo:
     # The typed-answers box is hidden with CSS (not visible=False) so it stays
     # in the DOM: the submission-type toggle JS needs getElementById to find it.
-    css="#typed-box { display: none; }",
-) as demo:
+    # (Gradio 6 moved css from Blocks() to launch(); gr.HTML <style> works with
+    # mount_gradio_app on every version.)
+    gr.HTML("<style>#typed-box { display: none; }</style>")
     gr.Markdown(
         """# 📝 Homework Grader
 Upload a homework submission and get it graded — Math and Science, with
