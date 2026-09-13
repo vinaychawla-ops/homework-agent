@@ -102,3 +102,19 @@ failure modes:
   `i = await this.functions.frontend(t)` then `{type:'data', data:i}`.
   If the js promise never settles, nothing ever renders — matches the
   observed silence exactly.
+
+## 2026-09-12 21:35 EDT — Redeployed with hardened Grade button JS
+
+- Vin provided a fresh one-time Modal token at 21:34 EDT. Deployed via Modal Python SDK from venv (`modal deploy modal_app.py`), completed in 82s.
+- Verified new code is LIVE: production `/config` shows Grade button (component 16) click dependency with new 3,234-char JS (AbortController, grade-status, "Immediate feedback" comment). Note: events live under top-level `dependencies`, not component `events` — earlier check looked in wrong place.
+- Also confirmed: all 3 JS-only events present (mode toggle 227 chars, sample photo 390 chars, grade 3234 chars), all `backend_fn: False` (no Gradio queue).
+- Old silent failure should now be impossible: immediate "Grading…" DOM status, 180s AbortController timeout, resp.ok check, response-shape validation.
+- Awaiting live browser E2E to confirm the click handler fires and grading completes end-to-end.
+
+## 2026-09-12 21:38 EDT — Browser E2E round 1: Grade button now responds, 2 bugs found
+
+Browser QA (live site, sample photo + typed text flows):
+- GOOD: Clicking "Grade homework" now fires the handler and surfaces a visible error — the silent failure is FIXED.
+- BUG 1: `/api/grade` returns HTTP 422 instantly. Root cause: Gradio passes `undefined`/`null` for at least one required field (assignment_id/student_name/student_email/submission_type), and `JSON.stringify` drops `undefined`, failing Pydantic validation. Verified via direct API tests: missing/null required field → 422; empty strings → HTTP 200 with graceful "Please enter a student name" message.
+- BUG 2: Selecting "Typed text" shows no textarea. Root cause: `typed_text` uses `visible=False`, so Gradio never renders it in the DOM; the toggle JS `getElementById('typed-box')` returns null and throws, killing the toggle.
+- Fix plan: (1) coerce all JS values to safe string defaults before POST (lets backend's graceful validation take over); (2) render `typed_text` normally but hide via CSS `#typed-box{display:none}`, so the toggle JS can find it.

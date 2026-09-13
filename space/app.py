@@ -201,6 +201,18 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
         '_No emails were sent._'
     );
     try {
+        // Defensive coercion: Gradio may pass undefined/null for untouched or
+        // hidden inputs, and JSON.stringify drops undefined keys — either one
+        // trips the API's required-field validation (HTTP 422). Coerce here so
+        // the request always validates and the backend's graceful "please
+        // check your inputs" handling takes over instead of a cryptic 422.
+        const s = (v, d) => (typeof v === 'string' && v !== null ? v : (d || ''));
+        assignment_id = s(assignment_id, 'sci-water-cycle-01');
+        student_name = s(student_name);
+        student_email = s(student_email);
+        submission_type = s(submission_type, 'Photo of handwritten work');
+        typed_text = s(typed_text);
+        ocr_mode = s(ocr_mode, 'auto');
         // Read the selected file straight from the page: the bytes travel with
         // this request, so grading never depends on which container served what.
         const fileInput = document.querySelector('#upload-box input[type="file"]');
@@ -260,7 +272,12 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
 }"""
 
 
-with gr.Blocks(title="Homework Grader") as demo:
+with gr.Blocks(
+    title="Homework Grader",
+    # The typed-answers box is hidden with CSS (not visible=False) so it stays
+    # in the DOM: the submission-type toggle JS needs getElementById to find it.
+    css="#typed-box { display: none; }",
+) as demo:
     gr.Markdown(
         """# 📝 Homework Grader
 Upload a homework submission and get it graded — Math and Science, with
@@ -294,7 +311,6 @@ otherwise the local pipeline does its best."""
         label="Typed answers",
         placeholder="Q1: b\nQ2: ...",
         lines=6,
-        visible=False,
         elem_id="typed-box",
     )
     upload = gr.File(
