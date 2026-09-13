@@ -1,11 +1,18 @@
 """Homework Grader web demo (Hugging Face Space).
 
-Upload a homework submission — typed text, a PDF, or a photo of handwritten
-work — and get back the graded sheet. The assignment is optional: leave it
-blank and it is auto-detected from the homework content. The graded sheet is
-emailed to both the student and the teacher (real delivery when Gmail
-credentials are configured, otherwise the UI shows which messages would have
-been sent).
+Two views behind a Student / Teacher toggle (Student is the default):
+
+- **Student view:** pick the assignment from a dropdown, enter name and email,
+  upload the homework as a photo/scan, PDF, Word (.docx), or plain text file,
+  and get it graded. The teacher's email address is taken from the assignment
+  itself, so the student never has to enter it.
+- **Teacher view:** the full grading form (typed text, PDF/photo uploads, OCR
+  mode, explicit teacher email, sample photo) plus the Create assignment tab
+  for uploading answer keys.
+
+The graded sheet is emailed to both the student and the teacher (real delivery
+when Gmail credentials are configured, otherwise the UI shows which messages
+would have been sent).
 
 Architecture note: grading is served through a plain FastAPI endpoint
 (`POST /api/grade`) that the page calls with `fetch`. Gradio's queue keeps
@@ -77,20 +84,41 @@ def grade_homework(
     typed_text: str,
     upload_b64: str,
     ocr_mode: str,
+    filename: str = "",
 ):
-    """Grade one submission and return (graded sheet markdown, email summary)."""
+    """Grade one submission and return (graded sheet markdown, email summary).
+
+    ``teacher_email`` is optional: when blank, the assignment's own teacher
+    address is used (the student view never asks for it). ``filename`` is the
+    original upload name; it routes student uploads (image / PDF / Word /
+    plain text) to the right parser.
+    """
     if not student_name.strip():
         raise gr.Error("Please enter a student name.")
-    if not teacher_email.strip() or "@" not in teacher_email:
-        raise gr.Error("Please enter the teacher's email address.")
+    # The teacher email is validated after the assignment is resolved below:
+    # a blank field falls back to the assignment's teacher address.
 
+    suffix = os.path.splitext(filename or "")[1].lower()
     if submission_type == "Typed text":
         if not typed_text.strip():
             raise gr.Error("Please paste the student's answers as text.")
         fmt, content = "text", typed_text
-    elif submission_type == "PDF upload":
+    elif submission_type == "PDF upload" or suffix == ".pdf":
         fmt, content = "pdf", _materialize_upload(upload_b64, ".pdf")
-    else:  # Photo of handwritten work
+    elif suffix in (".txt", ".md", ".docx"):
+        # Word / plain-text upload: read the text directly, no OCR involved.
+        path = _materialize_upload(upload_b64, suffix)
+        try:
+            text = answer_key.extract_key_text(path, filename)
+        finally:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        if not text.strip():
+            raise gr.Error("Could not read any text from the uploaded file.")
+        fmt, content = "text", text
+    else:  # Photo of handwritten work (teacher view) or an image upload
         fmt, content = "image", _materialize_upload(upload_b64, ".png")
 
     # The assignment name is optional: an exact/partial name wins, otherwise
@@ -124,6 +152,15 @@ def grade_homework(
                 "Try typing the assignment name, or include the question in the answers."
             )
 
+    # The teacher's copy goes to the explicitly given address, or — when the
+    # student view leaves the field blank — to the assignment's own teacher.
+    teacher_email = (teacher_email or "").strip() or assignment.teacher_email
+    if not teacher_email or "@" not in teacher_email:
+        raise gr.Error(
+            "Could not determine the teacher's email address for this "
+            "assignment. Please enter it explicitly."
+        )
+
     mailer = email_service.make_email_service()
     try:
         sheet, emails = pipeline.run_pipeline(
@@ -135,7 +172,7 @@ def grade_homework(
             transcribed_text=transcribed_text,
             email_service=mailer,
             ocr_mode=ocr_mode,
-            teacher_email=teacher_email.strip(),
+            teacher_email=teacher_email,
         )
     except Exception as exc:  # surface OCR / API failures readably
         # Return (don't raise): the message stays visible in the page even if
@@ -177,6 +214,7 @@ class GradeRequest(BaseModel):
     typed_text: str = ""
     upload_b64: str = ""
     ocr_mode: str = "auto"
+    filename: str = ""
 
 
 api_router = APIRouter()
@@ -196,6 +234,7 @@ def api_grade(req: GradeRequest):
             req.typed_text,
             req.upload_b64,
             req.ocr_mode,
+            req.filename,
         )
     except gr.Error as exc:
         sheet_md = (
@@ -409,6 +448,63 @@ _HOOK_JS = """() => {
     };
     __hg_render_list();
     window.__hg_render_list = __hg_render_list;
+    // Student view: capture the homework file at selection time (same reason
+    // as the teacher upload hook above: Gradio may clear the file input).
+    window.__hg_student_b64 = '';
+    window.__hg_student_name = '';
+    document.addEventListener('change', (e) => {
+        const t = e.target;
+        if (!t || !t.matches || !t.matches('input[type="file"]')) return;
+        if (!t.closest('#student-upload-box')) return;
+        const f = t.files && t.files[0];
+        window.__hg_student_name = (f && f.name) || '';
+        if (!f) { window.__hg_student_b64 = ''; return; }
+        const r = new FileReader();
+        r.onload = () => {
+            window.__hg_student_b64 = String(r.result).split(',')[1] || '';
+        };
+        r.onerror = () => { window.__hg_student_b64 = ''; };
+        r.readAsDataURL(f);
+    }, true);
+    // Student view: assignment dropdown, filled from the same listing (the
+    // option value is the assignment id, which resolve_assignment accepts).
+    const __hg_render_student_assignments = async () => {
+        const sel = document.getElementById('student-assignment');
+        if (!sel) return;
+        try {
+            const r = await fetch('/api/assignments');
+            const data = await r.json();
+            const items = (data && data.assignments) || [];
+            sel.innerHTML = '';
+            const ph = document.createElement('option');
+            ph.value = '';
+            ph.textContent = items.length ? 'Choose your assignment' : 'No assignments available yet';
+            sel.appendChild(ph);
+            items.forEach((a) => {
+                const o = document.createElement('option');
+                o.value = a.id;
+                o.textContent = a.title + ' (' + a.questions + ' questions)';
+                sel.appendChild(o);
+            });
+        } catch (e) { /* leave the dropdown as-is */ }
+    };
+    __hg_render_student_assignments();
+    window.__hg_render_student_assignments = __hg_render_student_assignments;
+    // Role toggle: the Student view is the default. Called by the two role
+    // buttons; also run once here so the active button is styled on load.
+    window.__hg_set_role = (role) => {
+        const student = role !== 'teacher';
+        const sv = document.getElementById('student-view');
+        const tv = document.getElementById('teacher-view');
+        if (sv) sv.style.display = student ? 'block' : 'none';
+        if (tv) tv.style.display = student ? 'none' : 'block';
+        [['role-student-btn', student], ['role-teacher-btn', !student]].forEach(([id, active]) => {
+            const wrap = document.getElementById(id);
+            const b = (wrap && wrap.querySelector('button')) || wrap;
+            if (b) b.style.fontWeight = active ? '700' : '400';
+        });
+    };
+    window.__hg_set_role('student');
 }"""
 
 _GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email, submission_type, typed_text, ocr_mode) => {
@@ -463,6 +559,70 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email,
                     typed_text: typed_text,
                     upload_b64: b64,
                     ocr_mode: ocr_mode,
+                }),
+                signal: controller.signal,
+            });
+        } catch (e) {
+            if (e && e.name === 'AbortError') {
+                return fail('The request timed out after 3 minutes. The server may be busy — please retry.');
+            }
+            throw e;
+        } finally {
+            clearTimeout(timeoutId);
+        }
+        if (!resp.ok) {
+            return fail('The server returned HTTP ' + resp.status + '. Please retry.');
+        }
+        const data = await resp.json();
+        if (!data || typeof data.sheet_md !== 'string') {
+            return fail('The server returned an unexpected response. Please retry.');
+        }
+        return done(data.sheet_md, data.email_md || '_No emails were sent._');
+    } catch (e) {
+        return fail(e && e.message ? e.message : String(e));
+    }
+}"""
+
+_GRADE_STUDENT_JS = """async (student_name, student_email) => {
+    // Student view grading: the assignment comes from the dropdown (its
+    // value is the assignment id) and the teacher email is left blank so the
+    // server fills it in from the assignment. Uploads may be an image, a PDF,
+    // Word (.docx), or plain text — the server routes by file extension.
+    const statusEl = document.getElementById('student-grade-status');
+    const setStatus = (t) => { if (statusEl) statusEl.innerHTML = t; };
+    setStatus('_Grading — contacting the grader…_');
+    const done = (sheet, email) => { setStatus(''); return [sheet, email]; };
+    const fail = (msg) => done(
+        '### Could not grade this submission\\n\\n' + msg + '\\n\\n_Please retry._',
+        '_No emails were sent._'
+    );
+    try {
+        const s = (v, d) => (typeof v === 'string' && v !== null ? v : (d || ''));
+        student_name = s(student_name);
+        student_email = s(student_email);
+        const sel = document.getElementById('student-assignment');
+        const assignment_id = (sel && sel.value) || '';
+        if (!assignment_id) return fail('Please choose your assignment from the list.');
+        const b64 = (typeof window !== 'undefined' && window.__hg_student_b64) || '';
+        const name = (typeof window !== 'undefined' && window.__hg_student_name) || '';
+        if (!b64) return fail('Please upload your homework file first.');
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 180000);
+        let resp;
+        try {
+            resp = await fetch('/api/grade', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    assignment_id: assignment_id,
+                    student_name: student_name,
+                    student_email: student_email,
+                    teacher_email: '',
+                    submission_type: 'Student upload',
+                    typed_text: '',
+                    upload_b64: b64,
+                    ocr_mode: 'auto',
+                    filename: name,
                 }),
                 signal: controller.signal,
             });
@@ -571,152 +731,207 @@ with gr.Blocks(title="Homework Grader") as demo:
     # in the DOM: the submission-type toggle JS needs getElementById to find it.
     # (Gradio 6 moved css from Blocks() to launch(); gr.HTML <style> works with
     # mount_gradio_app on every version.)
-    gr.HTML("<style>#typed-box { display: none; }</style>")
+    gr.HTML("<style>#typed-box { display: none; } #teacher-view { display: none; }</style>")
     gr.Markdown(
         """# 📝 Homework Grader
-Upload a homework submission and get it graded — Math and Science, with
-explanations for every wrong answer.
+Math and Science homework, graded with explanations for every wrong answer.
 
-**How it works:** printed/scanned pages are read with Docling's local OCR.
-For handwriting, pick the **vlm** mode to transcribe with Google Gemma via
-OpenRouter (needs an `OPENROUTER_API_KEY` secret on the deployment) —
-otherwise the local pipeline does its best."""
+**Students:** pick your assignment, enter your details, and upload your work —
+a photo/scan, PDF, Word document, or text file. The graded sheet is emailed to
+you and your teacher automatically.
+
+**Teachers:** switch to the Teacher view for the full grading form and to
+create new assignments from an answer key."""
     )
-    with gr.Tab("Grade homework"):
-        with gr.Row():
-            assignment = gr.Textbox(
-                label="Assignment (name or ID) — optional, auto-detected if blank or unknown",
-                value="",
-                placeholder="e.g. Rainbows — leave blank and the app figures it out",
-                elem_id="assignment-box",
-            )
-            ocr_mode = gr.Radio(
-                choices=OCR_CHOICES, value="auto", label="OCR mode (images only)"
-            )
-        gr.Markdown("_" + ASSIGNMENT_HINT + "_")
-        with gr.Row():
-            student_name = gr.Textbox(label="Student name", placeholder="Priya Nair")
-            student_email = gr.Textbox(
-                label="Student email", placeholder="priya.student@example.edu"
-            )
-            teacher_email = gr.Textbox(
-                label="Teacher email", placeholder="ms.rivera@school.edu"
-            )
-        submission_type = gr.Radio(
-            choices=["Typed text", "PDF upload", "Photo of handwritten work"],
-            value="Photo of handwritten work",
-            label="Submission type",
-        )
-        typed_text = gr.Textbox(
-            label="Typed answers",
-            placeholder="Q1: b\nQ2: ...",
-            lines=6,
-            elem_id="typed-box",
-        )
-        upload = gr.File(
-            label="Upload file",
-            file_types=["image", ".pdf"],
-            type="filepath",
-            elem_id="upload-box",
-        )
-        # Hidden: base64 bytes staged by the sample-photo button. A user-selected
-        # file is read by the Grade button's JavaScript instead.
-        sample_status = gr.Markdown("")
+    with gr.Row():
+        student_btn = gr.Button("🎒 Student", elem_id="role-student-btn")
+        teacher_btn = gr.Button("🧑‍🏫 Teacher", elem_id="role-teacher-btn")
+    # JavaScript-only role toggle (fn=None): no Gradio queue involvement.
+    student_btn.click(None, js="() => window.__hg_set_role('student')")
+    teacher_btn.click(None, js="() => window.__hg_set_role('teacher')")
 
-        # All events below are JavaScript-only (fn=None): no Gradio queue, so no
-        # per-container event state for Modal's load balancer to split up.
-        # Page-load hook: captures upload bytes at selection time (see _HOOK_JS).
-        demo.load(None, js=_HOOK_JS)
-        submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
-
-        with gr.Row():
-            grade_btn = gr.Button("Grade homework", variant="primary")
-            sample_btn = gr.Button("Use sample photo")
-        grade_status = gr.Markdown("", elem_id="grade-status")
-
-        sample_btn.click(None, inputs=[], outputs=[sample_status], js=_SAMPLE_JS)
-
-        sheet_out = gr.Markdown(label="Graded sheet")
-        email_out = gr.Markdown(label="Emails")
-
-        grade_btn.click(
-            None,
-            inputs=[
-                assignment,
-                student_name,
-                student_email,
-                teacher_email,
-                submission_type,
-                typed_text,
-                ocr_mode,
-            ],
-            outputs=[sheet_out, email_out],
-            js=_GRADE_JS,
-        )
-
+    with gr.Column(elem_id="student-view"):
         gr.Markdown(
-            "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
-            " project. Email delivery is live when Gmail credentials are configured,"
-            " otherwise mocked._"
+            "### 🎒 Submit your homework\n"
+            "Choose your assignment, enter your name and email, and upload your "
+            "work. Your teacher gets the graded copy automatically."
         )
-
-    with gr.Tab("Create assignment"):
-        gr.Markdown(
-            "### ➕ Create an assignment from an answer key\n"
-            "Upload the answer key as a **photo/scan** (handwritten or printed), "
-            "**PDF**, **Word (.docx)**, or **plain text** — or paste it below. "
-            "The key is read and shown for review; fix anything misread, then "
-            "create the assignment. Students can then submit against it by name, "
-            "and it is graded against your key."
+        # Native <select>, filled by the page-load hook from /api/assignments
+        # (a Gradio Dropdown can't be populated from JS this easily).
+        gr.HTML(
+            '<div style="margin-bottom: 12px;">'
+            '<label for="student-assignment" style="font-weight: 600;">'
+            "Assignment</label><br>"
+            '<select id="student-assignment" style="width: 100%; padding: 8px; '
+            'border-radius: 8px; border: 1px solid #ccc; margin-top: 4px;">'
+            '<option value="">Loading assignments…</option>'
+            "</select></div>"
         )
         with gr.Row():
-            new_title = gr.Textbox(
-                label="Assignment title", placeholder="e.g. Fractions Quiz"
+            s_name = gr.Textbox(label="Your name", placeholder="Priya Nair")
+            s_email = gr.Textbox(
+                label="Your email", placeholder="priya.student@example.edu"
             )
-            new_subject = gr.Dropdown(
-                choices=["math", "science"], value="math", label="Subject"
-            )
-        with gr.Row():
-            new_teacher_name = gr.Textbox(
-                label="Teacher name", placeholder="Jane Doe"
-            )
-            new_teacher_email = gr.Textbox(
-                label="Teacher email", placeholder="jane@school.edu"
-            )
-        key_upload = gr.File(
-            label="Upload answer key (image, PDF, .docx, .txt)",
+        s_upload = gr.File(
+            label="Upload your homework (photo, scanned PDF, Word, or text file)",
             file_types=["image", ".pdf", ".docx", ".txt", ".md"],
             type="filepath",
-            elem_id="key-upload-box",
+            elem_id="student-upload-box",
         )
-        read_key_btn = gr.Button("Read answer key")
-        read_status = gr.Markdown("", elem_id="read-status")
-        key_text = gr.Textbox(
-            label="Answer key — one question per line (review and edit)",
-            placeholder="Q1 [numeric] || 3/4\nQ2 [multiple_choice] || b",
-            lines=12,
-            elem_id="key-text-box",
+        s_grade_btn = gr.Button("Grade my homework", variant="primary")
+        s_status = gr.Markdown("", elem_id="student-grade-status")
+        s_sheet = gr.Markdown(label="Graded sheet")
+        s_email_out = gr.Markdown(label="Emails")
+        s_grade_btn.click(
+            None,
+            inputs=[s_name, s_email],
+            outputs=[s_sheet, s_email_out],
+            js=_GRADE_STUDENT_JS,
         )
         gr.Markdown(
-            "Format per line: `Q1 [type] optional prompt || answer || explanation "
-            "|| points: 2 || concepts: a, b`. `[type]` is one of `numeric`, "
-            "`multiple_choice`, `expression`, `short_answer` — leave it out and "
-            "the type is inferred from the answer (shown back in brackets for "
-            "you to correct). Lines starting with `#` are ignored; `Title:`, "
-            "`Subject:`, and `Teacher: Name <email>` header lines are optional."
+            "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
+            " project._"
         )
-        create_btn = gr.Button("Create assignment", variant="primary")
-        create_status = gr.Markdown("", elem_id="create-status")
-        assignment_list = gr.Markdown("", elem_id="assignment-list")
 
-        # JavaScript-only (fn=None): no Gradio queue, same as the Grade tab.
-        read_key_btn.click(None, inputs=[], outputs=[create_status], js=_READ_KEY_JS)
-        create_btn.click(
-            None,
-            inputs=[new_title, new_subject, new_teacher_name, new_teacher_email, key_text],
-            outputs=[create_status],
-            js=_CREATE_JS,
-        )
+    # Page-load hook: captures upload bytes at selection time, fills the
+    # student assignment dropdown, installs the role toggle. JavaScript-only.
+    demo.load(None, js=_HOOK_JS)
+
+    with gr.Column(elem_id="teacher-view"):
+        with gr.Tab("Grade homework"):
+            with gr.Row():
+                assignment = gr.Textbox(
+                    label="Assignment (name or ID) — optional, auto-detected if blank or unknown",
+                    value="",
+                    placeholder="e.g. Rainbows — leave blank and the app figures it out",
+                    elem_id="assignment-box",
+                )
+                ocr_mode = gr.Radio(
+                    choices=OCR_CHOICES, value="auto", label="OCR mode (images only)"
+                )
+            gr.Markdown("_" + ASSIGNMENT_HINT + "_")
+            with gr.Row():
+                student_name = gr.Textbox(label="Student name", placeholder="Priya Nair")
+                student_email = gr.Textbox(
+                    label="Student email", placeholder="priya.student@example.edu"
+                )
+                teacher_email = gr.Textbox(
+                    label="Teacher email (optional — uses the assignment's teacher if blank)",
+                    placeholder="ms.rivera@school.edu",
+                )
+            submission_type = gr.Radio(
+                choices=["Typed text", "PDF upload", "Photo of handwritten work"],
+                value="Photo of handwritten work",
+                label="Submission type",
+            )
+            typed_text = gr.Textbox(
+                label="Typed answers",
+                placeholder="Q1: b\nQ2: ...",
+                lines=6,
+                elem_id="typed-box",
+            )
+            upload = gr.File(
+                label="Upload file",
+                file_types=["image", ".pdf"],
+                type="filepath",
+                elem_id="upload-box",
+            )
+            # Hidden: base64 bytes staged by the sample-photo button. A user-selected
+            # file is read by the Grade button's JavaScript instead.
+            sample_status = gr.Markdown("")
+
+            # All events below are JavaScript-only (fn=None): no Gradio queue, so no
+            # per-container event state for Modal's load balancer to split up.
+            submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
+
+            with gr.Row():
+                grade_btn = gr.Button("Grade homework", variant="primary")
+                sample_btn = gr.Button("Use sample photo")
+            grade_status = gr.Markdown("", elem_id="grade-status")
+
+            sample_btn.click(None, inputs=[], outputs=[sample_status], js=_SAMPLE_JS)
+
+            sheet_out = gr.Markdown(label="Graded sheet")
+            email_out = gr.Markdown(label="Emails")
+
+            grade_btn.click(
+                None,
+                inputs=[
+                    assignment,
+                    student_name,
+                    student_email,
+                    teacher_email,
+                    submission_type,
+                    typed_text,
+                    ocr_mode,
+                ],
+                outputs=[sheet_out, email_out],
+                js=_GRADE_JS,
+            )
+
+            gr.Markdown(
+                "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
+                " project. Email delivery is live when Gmail credentials are configured,"
+                " otherwise mocked._"
+            )
+
+        with gr.Tab("Create assignment"):
+            gr.Markdown(
+                "### ➕ Create an assignment from an answer key\n"
+                "Upload the answer key as a **photo/scan** (handwritten or printed), "
+                "**PDF**, **Word (.docx)**, or **plain text** — or paste it below. "
+                "The key is read and shown for review; fix anything misread, then "
+                "create the assignment. Students can then submit against it by name, "
+                "and it is graded against your key."
+            )
+            with gr.Row():
+                new_title = gr.Textbox(
+                    label="Assignment title", placeholder="e.g. Fractions Quiz"
+                )
+                new_subject = gr.Dropdown(
+                    choices=["math", "science"], value="math", label="Subject"
+                )
+            with gr.Row():
+                new_teacher_name = gr.Textbox(
+                    label="Teacher name", placeholder="Jane Doe"
+                )
+                new_teacher_email = gr.Textbox(
+                    label="Teacher email", placeholder="jane@school.edu"
+                )
+            key_upload = gr.File(
+                label="Upload answer key (image, PDF, .docx, .txt)",
+                file_types=["image", ".pdf", ".docx", ".txt", ".md"],
+                type="filepath",
+                elem_id="key-upload-box",
+            )
+            read_key_btn = gr.Button("Read answer key")
+            read_status = gr.Markdown("", elem_id="read-status")
+            key_text = gr.Textbox(
+                label="Answer key — one question per line (review and edit)",
+                placeholder="Q1 [numeric] || 3/4\nQ2 [multiple_choice] || b",
+                lines=12,
+                elem_id="key-text-box",
+            )
+            gr.Markdown(
+                "Format per line: `Q1 [type] optional prompt || answer || explanation "
+                "|| points: 2 || concepts: a, b`. `[type]` is one of `numeric`, "
+                "`multiple_choice`, `expression`, `short_answer` — leave it out and "
+                "the type is inferred from the answer (shown back in brackets for "
+                "you to correct). Lines starting with `#` are ignored; `Title:`, "
+                "`Subject:`, and `Teacher: Name <email>` header lines are optional."
+            )
+            create_btn = gr.Button("Create assignment", variant="primary")
+            create_status = gr.Markdown("", elem_id="create-status")
+            assignment_list = gr.Markdown("", elem_id="assignment-list")
+
+            # JavaScript-only (fn=None): no Gradio queue, same as the Grade tab.
+            read_key_btn.click(None, inputs=[], outputs=[create_status], js=_READ_KEY_JS)
+            create_btn.click(
+                None,
+                inputs=[new_title, new_subject, new_teacher_name, new_teacher_email, key_text],
+                outputs=[create_status],
+                js=_CREATE_JS,
+            )
 
 # The Modal deployment wires the same router in modal_app.py (registered on
 # the parent FastAPI app before Gradio is mounted).
