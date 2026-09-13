@@ -180,15 +180,42 @@ _TOGGLE_JS = """(v) => {
 
 _SAMPLE_JS = """async () => {
     const r = await fetch('/api/sample-image');
-    if (!r.ok) return ['', '_Could not load the sample photo._'];
+    if (!r.ok) return '_Could not load the sample photo._';
     const buf = await r.arrayBuffer();
     const bytes = new Uint8Array(buf);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    return [btoa(binary), '_Sample photo loaded — hit **Grade homework**._'];
+    // Stash where the Grade button looks (see page-load hook below).
+    window.__hg_upload_b64 = btoa(binary);
+    return '_Sample photo loaded — hit **Grade homework**._';
 }"""
 
-_GRADE_JS = """async (assignment_id, student_name, student_email, submission_type, typed_text, upload_b64, ocr_mode) => {
+# Runs once on page load. Captures the selected file's bytes at selection
+# time into window.__hg_upload_b64. This is necessary because Gradio uploads
+# the file immediately on selection and may clear or re-render the
+# <input type="file"> afterwards, so reading input.files at Grade-click time
+# finds nothing and grading fails with "Please upload a file." A
+# document-level capture-phase listener survives component re-renders.
+_HOOK_JS = """() => {
+    if (window.__hgHookInstalled) return;
+    window.__hgHookInstalled = true;
+    window.__hg_upload_b64 = '';
+    document.addEventListener('change', (e) => {
+        const t = e.target;
+        if (!t || !t.matches || !t.matches('input[type="file"]')) return;
+        if (!t.closest('#upload-box')) return;
+        const f = t.files && t.files[0];
+        if (!f) { window.__hg_upload_b64 = ''; return; }
+        const r = new FileReader();
+        r.onload = () => {
+            window.__hg_upload_b64 = String(r.result).split(',')[1] || '';
+        };
+        r.onerror = () => { window.__hg_upload_b64 = ''; };
+        r.readAsDataURL(f);
+    }, true);
+}"""
+
+_GRADE_JS = """async (assignment_id, student_name, student_email, submission_type, typed_text, ocr_mode) => {
     // Immediate feedback: this runs before any await, so if the event fires
     // at all the user sees it. If even this never appears, the click handler
     // itself is not running (not a network issue).
@@ -213,22 +240,13 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
         submission_type = s(submission_type, 'Photo of handwritten work');
         typed_text = s(typed_text);
         ocr_mode = s(ocr_mode, 'auto');
-        // Read the selected file straight from the page: the bytes travel with
-        // this request, so grading never depends on which container served what.
-        const fileInput = document.querySelector('#upload-box input[type="file"]');
-        const file = fileInput && fileInput.files && fileInput.files[0];
-        let b64 = upload_b64 || '';
-        if (file) {
-            try {
-                b64 = await new Promise((resolve, reject) => {
-                    const r = new FileReader();
-                    r.onload = () => resolve(String(r.result).split(',')[1]);
-                    r.onerror = () => reject(new Error('Could not read the selected file.'));
-                    r.readAsDataURL(file);
-                });
-            } catch (e) {
-                return fail('Could not read the selected file: ' + (e.message || e));
-            }
+        // Read the file bytes captured at selection time by the page-load
+        // hook (window.__hg_upload_b64). The bytes travel with this request,
+        // so grading never depends on which container served what — and never
+        // on the file input still holding the selection at click time.
+        let b64 = (typeof window !== 'undefined' && window.__hg_upload_b64) || '';
+        if (!b64 && (submission_type === 'Photo of handwritten work' || submission_type === 'PDF upload')) {
+            return fail('No file was captured. Please re-select the file and try again.');
         }
         // AbortController timeout: a hung connection must surface as an error,
         // never as eternal silence.
@@ -321,11 +339,12 @@ otherwise the local pipeline does its best."""
     )
     # Hidden: base64 bytes staged by the sample-photo button. A user-selected
     # file is read by the Grade button's JavaScript instead.
-    upload_b64 = gr.Textbox(visible=False, value="")
     sample_status = gr.Markdown("")
 
     # All events below are JavaScript-only (fn=None): no Gradio queue, so no
     # per-container event state for Modal's load balancer to split up.
+    # Page-load hook: captures upload bytes at selection time (see _HOOK_JS).
+    demo.load(None, js=_HOOK_JS)
     submission_type.change(None, inputs=submission_type, js=_TOGGLE_JS)
 
     with gr.Row():
@@ -333,7 +352,7 @@ otherwise the local pipeline does its best."""
         sample_btn = gr.Button("Use sample photo")
     grade_status = gr.Markdown("", elem_id="grade-status")
 
-    sample_btn.click(None, inputs=[], outputs=[upload_b64, sample_status], js=_SAMPLE_JS)
+    sample_btn.click(None, inputs=[], outputs=[sample_status], js=_SAMPLE_JS)
 
     sheet_out = gr.Markdown(label="Graded sheet")
     email_out = gr.Markdown(label="Emails")
@@ -346,7 +365,6 @@ otherwise the local pipeline does its best."""
             student_email,
             submission_type,
             typed_text,
-            upload_b64,
             ocr_mode,
         ],
         outputs=[sheet_out, email_out],

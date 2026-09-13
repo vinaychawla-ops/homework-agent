@@ -145,3 +145,44 @@ Browser QA (live site, sample photo + typed text flows):
 1. Silent Grade button (no output/error/loading) → Fixed: immediate DOM status, 180s AbortController timeout, visible errors for HTTP/malformed/network failures.
 2. HTTP 422 on grade (Gradio passes undefined/null; JSON.stringify drops keys) → Fixed: coerce all JS inputs to safe string defaults.
 3. Typed-text toggle broken (visible=False keeps element out of DOM) → Fixed: CSS hide via gr.HTML <style> (Gradio 6 moved css to launch()).
+
+## 2026-09-13 ~09:40 EDT — BUG 4: real file upload fails with "Please upload a file."
+
+Vin tested the live site himself: selected "Photo of handwritten work", uploaded
+IMG_7108.jpeg (5.2 MB, file name visible in the upload box), clicked "Grade
+homework" → "Could not grade this submission: 'Please upload a file.'"
+
+Root cause: the Grade button's JS read the file via
+`document.querySelector('#upload-box input[type="file"]').files[0]` at click
+time. But Gradio uploads the file immediately on selection and clears/re-renders
+the file input, so at click time `files[0]` is empty → the POST carried
+`upload_b64: ""` → backend raised gr.Error("Please upload a file."). The
+sample-photo button was unaffected (it fetches /api/sample-image itself), which
+is why overnight browser E2E passed while real uploads were broken — actual
+file selection through the browser was never exercised (known acceptance gap).
+
+Fix (space/app.py):
+- New `_HOOK_JS` runs on page load (`demo.load(None, js=...)`): installs a
+  document-level capture-phase `change` listener that captures the selected
+  file's bytes into `window.__hg_upload_b64` at selection time. Event
+  delegation survives Gradio re-rendering the input; clearing on file removal.
+- `_GRADE_JS` now reads `window.__hg_upload_b64` instead of scraping the file
+  input; shows "No file was captured. Please re-select the file and try again."
+  if empty for photo/PDF submissions.
+- `_SAMPLE_JS` writes to the same variable; the hidden `upload_b64` Gradio
+  textbox was removed (dead state).
+- Verified: 92 pytest pass; all 4 page JS blobs pass `node --check`; hook logic
+  unit-tested with a DOM stub (capture, clear-on-remove, ignores other inputs).
+- Deployed to Modal 2026-09-13 ~09:44 EDT; production /config confirms the hook
+  (668 chars), sample (481), grade (3713) JS live, all backend_fn=False.
+
+## 2026-09-13 ~09:46 EDT — Browser E2E round 4: upload bug FIXED ✅
+
+Live production browser test (public URL):
+- TEST 1 (real photo upload via Upload file box): PASS. science_homework.png
+  uploaded, "Grading — contacting the grader…" appeared, graded sheet rendered
+  in ~15s: Score 5/5 (100.0%) - 4/4 correct, per-question feedback accurate,
+  mock emails listed. No "Please upload a file" error.
+- TEST 2 (typed text regression): PASS. "Q1: b" → Score 1/5 (20.0%), Q1 Correct
+  (1/1 pts), unanswered questions Incorrect with "(no answer provided)".
+- VERDICT: the real-upload flow Vin hit now works end-to-end in the browser.
