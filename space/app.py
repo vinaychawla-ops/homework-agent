@@ -488,13 +488,18 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email,
 }"""
 
 _READ_KEY_JS = """async () => {
-    const statusEl = document.getElementById('create-status');
+    // Immediate feedback goes to #read-status, a dedicated element that is
+    // NOT a Gradio output: writing innerHTML directly into a component that
+    // is also an event output destroys its managed DOM and silently breaks
+    // later output updates (the status would stay stuck forever).
+    const statusEl = document.getElementById('read-status');
     const setStatus = (t) => { if (statusEl) statusEl.innerHTML = t; };
+    const done = (t) => { setStatus(''); return t; };
     setStatus('_Reading the answer key…_');
     try {
         const b64 = (typeof window !== 'undefined' && window.__hg_key_b64) || '';
         const name = (typeof window !== 'undefined' && window.__hg_key_name) || '';
-        if (!b64) return 'Please choose an answer-key file first.';
+        if (!b64) return done('Please choose an answer-key file first.');
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 180000);
         let resp;
@@ -506,14 +511,14 @@ _READ_KEY_JS = """async () => {
                 signal: controller.signal,
             });
         } catch (e) {
-            if (e && e.name === 'AbortError') return 'The request timed out after 3 minutes. Please retry.';
+            if (e && e.name === 'AbortError') return done('The request timed out after 3 minutes. Please retry.');
             throw e;
         } finally {
             clearTimeout(timeoutId);
         }
-        if (!resp.ok) return 'The server returned HTTP ' + resp.status + '. Please retry.';
+        if (!resp.ok) return done('The server returned HTTP ' + resp.status + '. Please retry.');
         const data = await resp.json();
-        if (data && data.error) return data.error;
+        if (data && data.error) return done(data.error);
         // Fill the editable key box via the DOM (kept out of outputs so a
         // failed read never wipes what the teacher already typed).
         const ta = document.querySelector('#key-text-box textarea');
@@ -522,9 +527,9 @@ _READ_KEY_JS = """async () => {
             ta.dispatchEvent(new Event('input', {bubbles: true}));
         }
         const n = (data && data.question_count) || 0;
-        return '_Read ' + n + ' question(s). Review the key above — fix anything misread — then press **Create assignment**._';
+        return done('_Read ' + n + ' question(s). Review the key above — fix anything misread — then press **Create assignment**._');
     } catch (e) {
-        return e && e.message ? e.message : String(e);
+        return done(e && e.message ? e.message : String(e));
     }
 }"""
 
@@ -685,6 +690,7 @@ otherwise the local pipeline does its best."""
             elem_id="key-upload-box",
         )
         read_key_btn = gr.Button("Read answer key")
+        read_status = gr.Markdown("", elem_id="read-status")
         key_text = gr.Textbox(
             label="Answer key — one question per line (review and edit)",
             placeholder="Q1 [numeric] || 3/4\nQ2 [multiple_choice] || b",
