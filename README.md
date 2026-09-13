@@ -68,8 +68,10 @@ python -m pytest tests/ -q
 ## Browser demo (Gradio UI)
 
 `space/app.py` is a Gradio web UI on top of the same deterministic pipeline:
-pick an assignment, enter the student, then submit typed text, a PDF, or a
-homework photo, and get the graded sheet back in the browser. Email stays
+enter the student, optionally name the assignment (or leave it blank — the
+app auto-detects which assignment the homework belongs to from its content),
+then submit typed text, a PDF, or a homework photo, and get the graded sheet
+back in the browser. Email stays
 mock-only (recipients are shown, nothing is sent).
 
 ```bash

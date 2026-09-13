@@ -25,8 +25,9 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from homework_agent import assignments, pipeline, report
+from homework_agent import assignments, pipeline, report, submission
 from homework_agent.email_service import MockEmailService
+from homework_agent.models import Submission
 
 ASSIGNMENT_HINT = "Available: " + ", ".join(
     f"{a.title} ({a.id})" for a in assignments.ASSIGNMENTS.values()
@@ -77,10 +78,6 @@ def grade_homework(
     """Grade one submission and return (graded sheet markdown, email summary)."""
     if not student_name.strip():
         raise gr.Error("Please enter a student name.")
-    try:
-        assignment = assignments.resolve_assignment(assignment_id)
-    except KeyError as exc:
-        raise gr.Error(str(exc))
 
     if submission_type == "Typed text":
         if not typed_text.strip():
@@ -91,6 +88,37 @@ def grade_homework(
     else:  # Photo of handwritten work
         fmt, content = "image", _materialize_upload(upload_b64, ".png")
 
+    # The assignment name is optional: an exact/partial name wins, otherwise
+    # the assignment is auto-detected from the homework content itself.
+    auto_detected = False
+    transcribed_text = None
+    try:
+        assignment = assignments.resolve_assignment(assignment_id)
+    except KeyError:
+        auto_detected = True
+        if fmt == "text":
+            raw_text = content
+        else:
+            tmp = Submission(
+                student_name=student_name.strip(),
+                student_email=student_email.strip() or "student@example.edu",
+                assignment_id="",
+                format=fmt,
+                content=content,
+            )
+            raw_text = submission._raw_text(tmp, ocr_mode=ocr_mode)
+            transcribed_text = raw_text  # reuse: don't OCR a second time
+        assignment = assignments.detect_assignment(raw_text)
+        if assignment is None:
+            available = ", ".join(
+                f"{a.title} ({a.id})" for a in assignments.ASSIGNMENTS.values()
+            )
+            raise gr.Error(
+                "Could not tell which assignment this homework belongs to. "
+                f"Available: {available}. "
+                "Try typing the assignment name, or include the question in the answers."
+            )
+
     mailer = MockEmailService()
     try:
         sheet, emails = pipeline.run_pipeline(
@@ -99,6 +127,7 @@ def grade_homework(
             student_email.strip() or "student@example.edu",
             fmt,
             content,
+            transcribed_text=transcribed_text,
             email_service=mailer,
             ocr_mode=ocr_mode,
         )
@@ -113,6 +142,10 @@ def grade_homework(
         return sheet_md, "_No emails were sent._"
 
     sheet_md = report.render_markdown(sheet)
+    if auto_detected:
+        sheet_md = (
+            "_Assignment auto-detected from the homework content._\n\n" + sheet_md
+        )
     email_lines = "\n".join(f"- **to:** {m.to} — {m.subject}" for m in emails)
     email_md = (
         "### Emails (mock — nothing was actually sent)\n\n"
@@ -320,9 +353,9 @@ otherwise the local pipeline does its best."""
     )
     with gr.Row():
         assignment = gr.Textbox(
-            label="Assignment (name or ID)",
-            value="Rainbows",
-            placeholder="e.g. Rainbows",
+            label="Assignment (name or ID) — optional, auto-detected if blank or unknown",
+            value="",
+            placeholder="e.g. Rainbows — leave blank and the app figures it out",
             elem_id="assignment-box",
         )
         ocr_mode = gr.Radio(

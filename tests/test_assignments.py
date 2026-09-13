@@ -4,7 +4,7 @@ assignment resolution (the web UI uses a textbox, not a dropdown)."""
 import pytest
 
 from homework_agent import assignments
-from homework_agent.assignments import get_assignment, resolve_assignment
+from homework_agent.assignments import detect_assignment, get_assignment, resolve_assignment
 
 
 def test_rainbow_assignment_registered():
@@ -47,3 +47,44 @@ def test_resolve_assignment_blank():
 def test_all_assignments_resolve_by_title():
     for a in assignments.ASSIGNMENTS.values():
         assert resolve_assignment(a.title).id == a.id
+
+
+def test_detect_assignment_rainbow_photo_text():
+    text = (
+        "Q17 How is rainbow created in the sky Ans. When you have rain and "
+        "shine at the same time; rain drops reflect sunlight into the sky"
+    )
+    assert detect_assignment(text).id == "sci-rainbows-01"
+
+
+def test_detect_assignment_water_cycle_text():
+    text = (
+        "Q1: b Q2: puddles disappear because heat evaporates the water into "
+        "water vapor Q3: condensation Q4: a"
+    )
+    assert detect_assignment(text).id == "sci-water-cycle-01"
+
+
+def test_detect_assignment_fractions_text():
+    text = "Q1: 3/4 Q2: x=4 Q3: b Q4: x^2+5x+6 Q5: 5/8 of the pizza is left"
+    assert detect_assignment(text).id == "math-fractions-01"
+
+
+def test_detect_assignment_answer_only_no_question_restated():
+    # No question prompt in the text; key concepts still identify it.
+    text = "A rainbow forms when sunlight shines through rain drops."
+    assert detect_assignment(text).id == "sci-rainbows-01"
+
+
+def test_detect_assignment_gibberish_returns_none():
+    assert detect_assignment("asdf qwer zxcv hello world foo bar") is None
+
+
+def test_detect_assignment_empty_returns_none():
+    assert detect_assignment("") is None
+    assert detect_assignment("   ") is None
+
+
+def test_detect_assignment_ambiguous_returns_none():
+    # Only generic words shared across assignments -> no clear winner.
+    assert detect_assignment("explain in one or two sentences what happens") is None

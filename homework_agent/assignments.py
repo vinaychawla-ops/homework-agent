@@ -1,5 +1,8 @@
 """Sample Math and Science assignments with answer keys (demo data)."""
 
+import re
+from typing import Optional
+
 from .models import Assignment, Question
 
 
@@ -157,3 +160,45 @@ def resolve_assignment(ref: str) -> Assignment:
         return partial[0]
     available = ", ".join(f"{a.title} ({a.id})" for a in ASSIGNMENTS.values())
     raise KeyError(f"Unknown assignment {ref!r}. Available: {available}")
+
+
+def _signal_words(text: str) -> set:
+    """Content words (4+ letters) used as assignment-detection signals."""
+    return set(re.findall(r"[a-z]{4,}", (text or "").lower()))
+
+
+def detect_assignment(text: str) -> Optional[Assignment]:
+    """Guess which assignment a submission belongs to from its text.
+
+    Scores each assignment by how many of its signal words (taken from
+    question prompts and key concepts) appear in the text. Each signal is
+    weighted by 1/(number of assignments that use it), so generic words
+    like "explain" that appear in several assignments don't dominate.
+
+    Returns the winning assignment when it has a clear lead (weighted
+    score >= 2 and strictly ahead of the runner-up); otherwise None.
+    """
+    haystack = (text or "").lower()
+    if not haystack.strip():
+        return None
+    scored = []
+    for assignment in ASSIGNMENTS.values():
+        signals = set()
+        for question in assignment.questions:
+            signals.update(_signal_words(question.prompt))
+            for concept in question.key_concepts or []:
+                signals.update(_signal_words(concept))
+        scored.append((assignment, signals))
+    rarity = {}
+    for _, signals in scored:
+        for word in signals:
+            rarity[word] = rarity.get(word, 0) + 1
+    ranked = []
+    for assignment, signals in scored:
+        score = sum(1.0 / rarity[word] for word in signals if word in haystack)
+        ranked.append((score, assignment))
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    (best_score, best), (runner_up_score, _) = ranked[0], ranked[1]
+    if best_score >= 2.0 and best_score > runner_up_score:
+        return best
+    return None
