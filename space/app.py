@@ -1,8 +1,11 @@
 """Homework Grader web demo (Hugging Face Space).
 
 Upload a homework submission — typed text, a PDF, or a photo of handwritten
-work — name the assignment, and get back the graded sheet. Email delivery is
-mocked: the UI shows which messages would have been sent.
+work — and get back the graded sheet. The assignment is optional: leave it
+blank and it is auto-detected from the homework content. The graded sheet is
+emailed to both the student and the teacher (real delivery when Gmail
+credentials are configured, otherwise the UI shows which messages would have
+been sent).
 
 Architecture note: grading is served through a plain FastAPI endpoint
 (`POST /api/grade`) that the page calls with `fetch`. Gradio's queue keeps
@@ -25,8 +28,7 @@ from fastapi import APIRouter
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from homework_agent import assignments, pipeline, report, submission
-from homework_agent.email_service import MockEmailService
+from homework_agent import assignments, email_service, pipeline, report, submission
 from homework_agent.models import Submission
 
 ASSIGNMENT_HINT = "Available: " + ", ".join(
@@ -70,6 +72,7 @@ def grade_homework(
     assignment_id: str,
     student_name: str,
     student_email: str,
+    teacher_email: str,
     submission_type: str,
     typed_text: str,
     upload_b64: str,
@@ -78,6 +81,8 @@ def grade_homework(
     """Grade one submission and return (graded sheet markdown, email summary)."""
     if not student_name.strip():
         raise gr.Error("Please enter a student name.")
+    if not teacher_email.strip() or "@" not in teacher_email:
+        raise gr.Error("Please enter the teacher's email address.")
 
     if submission_type == "Typed text":
         if not typed_text.strip():
@@ -119,7 +124,7 @@ def grade_homework(
                 "Try typing the assignment name, or include the question in the answers."
             )
 
-    mailer = MockEmailService()
+    mailer = email_service.make_email_service()
     try:
         sheet, emails = pipeline.run_pipeline(
             assignment,
@@ -130,6 +135,7 @@ def grade_homework(
             transcribed_text=transcribed_text,
             email_service=mailer,
             ocr_mode=ocr_mode,
+            teacher_email=teacher_email.strip(),
         )
     except Exception as exc:  # surface OCR / API failures readably
         # Return (don't raise): the message stays visible in the page even if
@@ -147,11 +153,18 @@ def grade_homework(
             "_Assignment auto-detected from the homework content._\n\n" + sheet_md
         )
     email_lines = "\n".join(f"- **to:** {m.to} — {m.subject}" for m in emails)
-    email_md = (
-        "### Emails (mock — nothing was actually sent)\n\n"
-        f"{email_lines}\n\n"
-        "_This demo uses a mock mailer. In production this is swapped for a real provider._"
-    )
+    if isinstance(mailer, email_service.SmtpEmailService):
+        email_md = (
+            "### Emails sent\n\n"
+            f"{email_lines}\n\n"
+            f"_Sent from {mailer.sender}._"
+        )
+    else:
+        email_md = (
+            "### Emails (mock — nothing was actually sent)\n\n"
+            f"{email_lines}\n\n"
+            "_This demo uses a mock mailer. In production this is swapped for a real provider._"
+        )
     return sheet_md, email_md
 
 
@@ -159,6 +172,7 @@ class GradeRequest(BaseModel):
     assignment_id: str
     student_name: str
     student_email: str
+    teacher_email: str = ""
     submission_type: str
     typed_text: str = ""
     upload_b64: str = ""
@@ -177,6 +191,7 @@ def api_grade(req: GradeRequest):
             req.assignment_id,
             req.student_name,
             req.student_email,
+            req.teacher_email,
             req.submission_type,
             req.typed_text,
             req.upload_b64,
@@ -260,7 +275,7 @@ _HOOK_JS = """() => {
     }, true);
 }"""
 
-_GRADE_JS = """async (assignment_id, student_name, student_email, submission_type, typed_text, ocr_mode) => {
+_GRADE_JS = """async (assignment_id, student_name, student_email, teacher_email, submission_type, typed_text, ocr_mode) => {
     // Immediate feedback: this runs before any await, so if the event fires
     // at all the user sees it. If even this never appears, the click handler
     // itself is not running (not a network issue).
@@ -282,6 +297,7 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
         assignment_id = s(assignment_id, 'Rainbows');
         student_name = s(student_name);
         student_email = s(student_email);
+        teacher_email = s(teacher_email);
         submission_type = s(submission_type, 'Photo of handwritten work');
         typed_text = s(typed_text);
         ocr_mode = s(ocr_mode, 'auto');
@@ -306,6 +322,7 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
                     assignment_id: assignment_id,
                     student_name: student_name,
                     student_email: student_email,
+                    teacher_email: teacher_email,
                     submission_type: submission_type,
                     typed_text: typed_text,
                     upload_b64: b64,
@@ -367,6 +384,9 @@ otherwise the local pipeline does its best."""
         student_email = gr.Textbox(
             label="Student email", placeholder="priya.student@example.edu"
         )
+        teacher_email = gr.Textbox(
+            label="Teacher email", placeholder="ms.rivera@school.edu"
+        )
     submission_type = gr.Radio(
         choices=["Typed text", "PDF upload", "Photo of handwritten work"],
         value="Photo of handwritten work",
@@ -410,6 +430,7 @@ otherwise the local pipeline does its best."""
             assignment,
             student_name,
             student_email,
+            teacher_email,
             submission_type,
             typed_text,
             ocr_mode,
@@ -420,7 +441,8 @@ otherwise the local pipeline does its best."""
 
     gr.Markdown(
         "_Demo of the [homework-agent](https://github.com/vinaychawla-ops/homework-agent)"
-        " project. Email delivery is mocked._"
+        " project. Email delivery is live when Gmail credentials are configured,"
+        " otherwise mocked._"
     )
 
 # The Modal deployment wires the same router in modal_app.py (registered on

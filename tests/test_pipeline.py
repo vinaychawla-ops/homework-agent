@@ -129,3 +129,26 @@ def test_pipeline_single_question_mislabeled_number_still_grades():
     )
     assert sheet.percentage == 100.0
     assert sheet.evaluations[0].student_answer != "(no answer provided)"
+
+
+def test_pipeline_teacher_email_override():
+    mailer = MockEmailService()
+    _, emails = run_pipeline(
+        assignments.get_assignment("sci-rainbows-01"),
+        "Alex Kumar", "alex.student@example.edu", "text",
+        "A rainbow is created when sunlight shines through rain drops.",
+        email_service=mailer,
+        teacher_email="real.teacher@school.edu",
+    )
+    assert emails[1].to == "real.teacher@school.edu"
+
+
+def test_pipeline_teacher_email_defaults_to_assignment():
+    mailer = MockEmailService()
+    _, emails = run_pipeline(
+        assignments.get_assignment("sci-rainbows-01"),
+        "Alex Kumar", "alex.student@example.edu", "text",
+        "A rainbow is created when sunlight shines through rain drops.",
+        email_service=mailer,
+    )
+    assert emails[1].to == "chen.teacher@example.edu"

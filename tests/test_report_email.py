@@ -67,3 +67,75 @@ def test_mock_email_json_log(tmp_path):
     with open(log, encoding="utf-8") as f:
         line = f.readline()
     assert '"to": "a@x.edu"' in line
+
+
+def test_smtp_email_service_sends_via_smtp(monkeypatch):
+    from homework_agent.email_service import SmtpEmailService
+
+    sent = {}
+
+    class FakeSMTP:
+        def __init__(self, host, port, timeout=None):
+            sent["host"], sent["port"] = host, port
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def starttls(self):
+            sent["tls"] = True
+
+        def login(self, user, password):
+            sent["login"] = (user, password)
+
+        def send_message(self, msg, from_addr=None, to_addrs=None):
+            sent["msg"] = msg
+            sent["from"] = from_addr
+            sent["to"] = to_addrs
+
+    monkeypatch.setattr("smtplib.SMTP", FakeSMTP)
+    svc = SmtpEmailService(
+        sender="grader@example.edu", username="grader@example.edu", password="secret"
+    )
+    out = svc.send(
+        to="teacher@school.edu", subject="Graded", body="sheet", cc=["s@x.edu"]
+    )
+    assert sent["host"] == "smtp.gmail.com"
+    assert sent["tls"] is True
+    assert sent["login"] == ("grader@example.edu", "secret")
+    assert sent["from"] == "grader@example.edu"
+    assert sent["to"] == ["teacher@school.edu", "s@x.edu"]
+    assert sent["msg"]["Subject"] == "Graded"
+    assert out.to == "teacher@school.edu"
+    assert svc.sent_to("teacher@school.edu") == [out]
+
+
+def test_smtp_email_service_rejects_bad_sender():
+    from homework_agent.email_service import SmtpEmailService
+
+    import pytest
+
+    with pytest.raises(ValueError):
+        SmtpEmailService(sender="not-an-email", username="x", password="y")
+    with pytest.raises(ValueError):
+        SmtpEmailService(sender="a@b.com", username="a@b.com", password="")
+
+
+def test_make_email_service_falls_back_to_mock(monkeypatch):
+    from homework_agent.email_service import (
+        MockEmailService,
+        SmtpEmailService,
+        make_email_service,
+    )
+
+    monkeypatch.delenv("GMAIL_SENDER", raising=False)
+    monkeypatch.delenv("GMAIL_APP_PASSWORD", raising=False)
+    assert isinstance(make_email_service(), MockEmailService)
+
+    monkeypatch.setenv("GMAIL_SENDER", "grader@example.edu")
+    monkeypatch.setenv("GMAIL_APP_PASSWORD", "secret")
+    svc = make_email_service()
+    assert isinstance(svc, SmtpEmailService)
+    assert svc.sender == "grader@example.edu"

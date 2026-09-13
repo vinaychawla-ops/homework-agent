@@ -10,7 +10,15 @@ public https://...modal.run URL.
 Handwriting VLM mode needs an `OPENROUTER_API_KEY`: add it as a Modal secret
 named `openrouter-api-key` in the dashboard (Secrets -> New secret), no
 redeploy required. Without it, image grading uses the local Docling pipeline.
+
+Real email delivery needs a Modal secret named `gmail-smtp` with
+`GMAIL_SENDER` (the From address) and `GMAIL_APP_PASSWORD` (a Gmail App
+Password for that account). Create it with:
+    modal secret create gmail-smtp GMAIL_SENDER=you@gmail.com GMAIL_APP_PASSWORD=xxxx
+and redeploy. Until then the gmail secret lookup below is skipped and the
+app uses the mock mailer (emails shown, not sent).
 """
+
 
 import modal
 
@@ -51,6 +59,8 @@ image = (
     .add_local_file("space/app.py", remote_path="/root/app.py", copy=True)
     .run_function(warmup_docling, timeout=1800)
 )
+
+
 
 
 @app.function(
