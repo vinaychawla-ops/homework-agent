@@ -42,7 +42,16 @@ def run_pipeline(
         content=content,
         transcribed_text=transcribed_text,
     )
-    answers: Dict[str, str] = submission.extract_answers(sub, ocr_mode=ocr_mode)
+    answers: Dict[str, str] = submission.extract_answers(
+        sub,
+        ocr_mode=ocr_mode,
+        # Single-question assignments (e.g. a photographed page whose "Q1:"
+        # label the OCR mangled) grade the whole text as that one answer
+        # rather than scoring a certain zero.
+        fallback_question_id=(
+            assignment.questions[0].id if len(assignment.questions) == 1 else None
+        ),
+    )
     sheet = grading.grade_submission(assignment, answers)
     sheet = replace(sheet, student_name=student_name, student_email=student_email)
 

@@ -48,13 +48,8 @@ def parse_text(text: str) -> Dict[str, str]:
     return answers
 
 
-def parse_pdf(path: str) -> Dict[str, str]:
-    """Extract answers from a PDF.
-
-    Reads the embedded text layer with pypdf first (fast, offline). If the
-    text layer is empty or suspiciously short the PDF is treated as scanned
-    and re-processed with Docling OCR.
-    """
+def _pdf_text(path: str) -> str:
+    """Raw text of a PDF: embedded text layer, or Docling OCR for scans."""
     if not os.path.exists(path):
         raise FileNotFoundError(f"PDF submission not found: {path}")
     try:
@@ -64,9 +59,34 @@ def parse_pdf(path: str) -> Dict[str, str]:
     reader = PdfReader(path)
     full_text = "\n".join(page.extract_text() or "" for page in reader.pages)
     if len(re.sub(r"\s+", "", full_text)) >= _SCANNED_PDF_THRESHOLD:
-        return parse_text(full_text)
+        return full_text
     # Scanned PDF: no usable text layer -> Docling OCR.
-    return parse_text(_ocr.extract_printed(path))
+    return _ocr.extract_printed(path)
+
+
+def parse_pdf(path: str) -> Dict[str, str]:
+    """Extract answers from a PDF.
+
+    Reads the embedded text layer with pypdf first (fast, offline). If the
+    text layer is empty or suspiciously short the PDF is treated as scanned
+    and re-processed with Docling OCR.
+    """
+    return parse_text(_pdf_text(path))
+
+
+def _image_text(
+    path: str,
+    transcribed_text: Optional[str] = None,
+    *,
+    ocr_mode: Optional[str] = None,
+) -> str:
+    """Raw transcription of a photo/scan of handwritten homework."""
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"Image submission not found: {path}")
+    text = transcribed_text
+    if not text or not text.strip():
+        text = _ocr.transcribe_image(path, mode=ocr_mode)
+    return text
 
 
 def parse_image(
@@ -83,24 +103,38 @@ def parse_image(
     configured, else the standard local OCR pipeline. ``ocr_mode`` forces
     ``"auto"`` | ``"docling"`` | ``"vlm"``.
     """
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"Image submission not found: {path}")
-    text = transcribed_text
-    if not text or not text.strip():
-        text = _ocr.transcribe_image(path, mode=ocr_mode)
-    return parse_text(text)
+    return parse_text(_image_text(path, transcribed_text, ocr_mode=ocr_mode))
 
 
-def extract_answers(
-    submission: Submission, *, ocr_mode: Optional[str] = None
-) -> Dict[str, str]:
-    """Dispatch to the right parser based on submission.format."""
+def _raw_text(submission: Submission, *, ocr_mode: Optional[str] = None) -> str:
+    """The submission's raw text, before answer-line parsing."""
     if submission.format == "text":
-        return parse_text(submission.content)
+        return submission.content
     if submission.format == "pdf":
-        return parse_pdf(submission.content)
+        return _pdf_text(submission.content)
     if submission.format == "image":
-        return parse_image(
+        return _image_text(
             submission.content, submission.transcribed_text, ocr_mode=ocr_mode
         )
     raise ValueError(f"Unsupported submission format: {submission.format!r}")
+
+
+def extract_answers(
+    submission: Submission,
+    *,
+    ocr_mode: Optional[str] = None,
+    fallback_question_id: Optional[str] = None,
+) -> Dict[str, str]:
+    """Dispatch to the right parser based on submission.format.
+
+    ``fallback_question_id``: when the assignment has exactly one question
+    and no ``"Q<n>:"`` answer lines could be parsed (e.g. handwriting OCR
+    mangled the label), the whole raw text is graded as that question's
+    answer instead of scoring a certain zero. With several questions there
+    is no way to attribute the text, so the fallback never applies.
+    """
+    text = _raw_text(submission, ocr_mode=ocr_mode)
+    answers = parse_text(text)
+    if not answers and fallback_question_id and text.strip():
+        answers = {fallback_question_id: text.strip()}
+    return answers

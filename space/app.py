@@ -1,7 +1,7 @@
 """Homework Grader web demo (Hugging Face Space).
 
 Upload a homework submission — typed text, a PDF, or a photo of handwritten
-work — pick an assignment, and get back the graded sheet. Email delivery is
+work — name the assignment, and get back the graded sheet. Email delivery is
 mocked: the UI shows which messages would have been sent.
 
 Architecture note: grading is served through a plain FastAPI endpoint
@@ -28,10 +28,9 @@ from pydantic import BaseModel
 from homework_agent import assignments, pipeline, report
 from homework_agent.email_service import MockEmailService
 
-ASSIGNMENT_CHOICES = [
-    ("Math: Fractions (math-fractions-01)", "math-fractions-01"),
-    ("Science: The Water Cycle (sci-water-cycle-01)", "sci-water-cycle-01"),
-]
+ASSIGNMENT_HINT = "Available: " + ", ".join(
+    f"{a.title} ({a.id})" for a in assignments.ASSIGNMENTS.values()
+)
 
 OCR_CHOICES = ["auto", "docling", "vlm"]
 
@@ -79,9 +78,9 @@ def grade_homework(
     if not student_name.strip():
         raise gr.Error("Please enter a student name.")
     try:
-        assignment = assignments.get_assignment(assignment_id)
-    except KeyError:
-        raise gr.Error(f"Unknown assignment {assignment_id!r}.")
+        assignment = assignments.resolve_assignment(assignment_id)
+    except KeyError as exc:
+        raise gr.Error(str(exc))
 
     if submission_type == "Typed text":
         if not typed_text.strip():
@@ -187,6 +186,19 @@ _SAMPLE_JS = """async () => {
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
     // Stash where the Grade button looks (see page-load hook below).
     window.__hg_upload_b64 = btoa(binary);
+    // The sample photo is the water-cycle homework: point the assignment
+    // textbox at it so grading matches.
+    const ab = document.querySelector('#assignment-box input, #assignment-box textarea');
+    if (ab) {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+            window.HTMLInputElement.prototype, 'value'
+        ).set || Object.getOwnPropertyDescriptor(
+            window.HTMLTextAreaElement.prototype, 'value'
+        ).set;
+        if (nativeSetter) nativeSetter.call(ab, 'The Water Cycle');
+        else ab.value = 'The Water Cycle';
+        ab.dispatchEvent(new Event('input', {bubbles: true}));
+    }
     return '_Sample photo loaded — hit **Grade homework**._';
 }"""
 
@@ -234,7 +246,7 @@ _GRADE_JS = """async (assignment_id, student_name, student_email, submission_typ
         // the request always validates and the backend's graceful "please
         // check your inputs" handling takes over instead of a cryptic 422.
         const s = (v, d) => (typeof v === 'string' && v !== null ? v : (d || ''));
-        assignment_id = s(assignment_id, 'sci-water-cycle-01');
+        assignment_id = s(assignment_id, 'Rainbows');
         student_name = s(student_name);
         student_email = s(student_email);
         submission_type = s(submission_type, 'Photo of handwritten work');
@@ -307,14 +319,16 @@ OpenRouter (needs an `OPENROUTER_API_KEY` secret on the deployment) —
 otherwise the local pipeline does its best."""
     )
     with gr.Row():
-        assignment = gr.Dropdown(
-            choices=ASSIGNMENT_CHOICES,
-            value="sci-water-cycle-01",
-            label="Assignment",
+        assignment = gr.Textbox(
+            label="Assignment (name or ID)",
+            value="Rainbows",
+            placeholder="e.g. Rainbows",
+            elem_id="assignment-box",
         )
         ocr_mode = gr.Radio(
             choices=OCR_CHOICES, value="auto", label="OCR mode (images only)"
         )
+    gr.Markdown("_" + ASSIGNMENT_HINT + "_")
     with gr.Row():
         student_name = gr.Textbox(label="Student name", placeholder="Priya Nair")
         student_email = gr.Textbox(

@@ -86,3 +86,28 @@ def test_pipeline_unknown_assignment():
 
     with pytest.raises(KeyError):
         assignments.get_assignment("nope-01")
+
+
+def test_pipeline_single_question_fallback_grades_unlabeled_prose():
+    # Vin's rainbow homework: prose with no parseable "Q1:" label still
+    # grades against the single-question assignment instead of scoring zero.
+    assignment = assignments.get_assignment("sci-rainbows-01")
+    sheet, _emails = run_pipeline(
+        assignment,
+        "Test Kid",
+        "kid@example.edu",
+        "text",
+        "When you have rain and shine at the same time; "
+        "sunlight passes through rain drops and create rainbow.",
+    )
+    ev = sheet.evaluations[0]
+    assert ev.is_correct
+    assert ev.points_earned == ev.points_possible
+
+
+def test_pipeline_multi_question_no_fallback():
+    assignment = assignments.get_assignment("sci-water-cycle-01")
+    sheet, _emails = run_pipeline(
+        assignment, "Test Kid", "kid@example.edu", "text", "some unlabeled prose"
+    )
+    assert all(e.points_earned == 0 for e in sheet.evaluations)

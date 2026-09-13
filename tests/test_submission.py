@@ -153,3 +153,26 @@ def test_extract_answers_dispatches_image():
         sample_path("science_homework.png"), transcribed_text="Q4: a",
     )
     assert extract_answers(sub) == {"Q4": "a"}
+
+
+def test_extract_answers_fallback_single_question_unlabeled_text():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
+                     "A rainbow forms when sunlight shines through rain drops.")
+    assert extract_answers(sub, fallback_question_id="Q1") == {
+        "Q1": "A rainbow forms when sunlight shines through rain drops."}
+
+
+def test_extract_answers_fallback_not_used_when_labels_parse():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text", "Q1: b")
+    assert extract_answers(sub, fallback_question_id="Q1") == {"Q1": "b"}
+
+
+def test_extract_answers_fallback_needs_nonblank_text():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text", "   ")
+    assert extract_answers(sub, fallback_question_id="Q1") == {}
+
+
+def test_extract_answers_no_fallback_by_default():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
+                     "A rainbow forms when sunlight shines through rain drops.")
+    assert extract_answers(sub) == {}

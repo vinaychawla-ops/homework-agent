@@ -104,9 +104,31 @@ def science_assignment() -> Assignment:
     )
 
 
+def rainbow_assignment() -> Assignment:
+    return Assignment(
+        id="sci-rainbows-01",
+        title="Rainbows",
+        subject="science",
+        teacher_name="Mr. Chen",
+        teacher_email="chen.teacher@example.edu",
+        questions=[
+            Question(
+                id="Q1",
+                subject="science",
+                prompt="How is a rainbow created in the sky?",
+                question_type="short_answer",
+                correct_answer="A rainbow appears when sunlight shines through raindrops while it is raining: the sunlight is refracted and reflected inside the drops and spreads out into colors.",
+                correct_explanation="A rainbow needs rain and sunshine at the same time. Sunlight entering the raindrops is refracted (bent), reflected inside the drop, and dispersed into the colors of the rainbow.",
+                key_concepts=["sunlight", "rain", "shine"],
+            ),
+        ],
+    )
+
+
 ASSIGNMENTS = {
     "math-fractions-01": math_assignment(),
     "sci-water-cycle-01": science_assignment(),
+    "sci-rainbows-01": rainbow_assignment(),
 }
 
 
@@ -115,3 +137,23 @@ def get_assignment(assignment_id: str) -> Assignment:
         return ASSIGNMENTS[assignment_id]
     except KeyError:
         raise KeyError(f"Unknown assignment {assignment_id!r}. Available: {sorted(ASSIGNMENTS)}")
+
+
+def resolve_assignment(ref: str) -> Assignment:
+    """Resolve a free-text assignment reference to an Assignment.
+
+    Accepts the assignment id or title, case-insensitively, or any
+    unambiguous substring of a title (e.g. "rainbows", "water", "fractions").
+    Raises KeyError listing the available assignments when nothing matches.
+    """
+    key = (ref or "").strip().lower()
+    if not key:
+        raise KeyError("No assignment was named.")
+    for assignment in ASSIGNMENTS.values():
+        if key == assignment.id.lower() or key == assignment.title.lower():
+            return assignment
+    partial = [a for a in ASSIGNMENTS.values() if key in a.title.lower()]
+    if len(partial) == 1:
+        return partial[0]
+    available = ", ".join(f"{a.title} ({a.id})" for a in ASSIGNMENTS.values())
+    raise KeyError(f"Unknown assignment {ref!r}. Available: {available}")
