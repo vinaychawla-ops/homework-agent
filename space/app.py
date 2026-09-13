@@ -187,18 +187,18 @@ _SAMPLE_JS = """async () => {
     // Stash where the Grade button looks (see page-load hook below).
     window.__hg_upload_b64 = btoa(binary);
     // The sample photo is the water-cycle homework: point the assignment
-    // textbox at it so grading matches.
-    const ab = document.querySelector('#assignment-box input, #assignment-box textarea');
-    if (ab) {
-        const nativeSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value'
-        ).set || Object.getOwnPropertyDescriptor(
-            window.HTMLTextAreaElement.prototype, 'value'
-        ).set;
-        if (nativeSetter) nativeSetter.call(ab, 'The Water Cycle');
-        else ab.value = 'The Water Cycle';
-        ab.dispatchEvent(new Event('input', {bubbles: true}));
-    }
+    // textbox at it so grading matches. Plain .value assignment plus a
+    // synthetic input event is what Svelte (Gradio 6) listens for; the
+    // native-setter dance is for React and throws "Illegal invocation"
+    // when the element is a <textarea>. Wrapped in try/catch so a DOM
+    // quirk can never break the photo stashing above.
+    try {
+        const ab = document.querySelector('#assignment-box textarea, #assignment-box input');
+        if (ab) {
+            ab.value = 'The Water Cycle';
+            ab.dispatchEvent(new Event('input', {bubbles: true}));
+        }
+    } catch (e) {}
     return '_Sample photo loaded — hit **Grade homework**._';
 }"""
 

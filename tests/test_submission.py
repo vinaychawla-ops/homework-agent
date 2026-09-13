@@ -176,3 +176,34 @@ def test_extract_answers_no_fallback_by_default():
     sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
                      "A rainbow forms when sunlight shines through rain drops.")
     assert extract_answers(sub) == {}
+
+
+def test_extract_answers_fallback_mislabeled_question_number():
+    # Regression: the VLM can misread "Q1" as "Q17:" (production 2026-09-13:
+    # auto-mode transcription parsed to {"Q17": ...}, Q1 scored zero with
+    # "(no answer provided)"). The single-question fallback must remap it.
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
+                     "Q17: When you have rain and shine at the same time.")
+    assert extract_answers(sub, fallback_question_id="Q1") == {
+        "Q1": "When you have rain and shine at the same time."}
+
+
+def test_extract_answers_fallback_mislabeled_joins_multiple():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
+                     "Q2: rain and shine\nQ9: sunlight through drops")
+    assert extract_answers(sub, fallback_question_id="Q1") == {
+        "Q1": "rain and shine sunlight through drops"}
+
+
+def test_extract_answers_fallback_blank_primary_uses_other_answers():
+    sub = Submission("A", "a@x.edu", "sci-rainbows-01", "text",
+                     "Q1:   \nQ3: sunlight through rain drops")
+    assert extract_answers(sub, fallback_question_id="Q1") == {
+        "Q1": "sunlight through rain drops"}
+
+
+def test_extract_answers_no_remap_for_multi_question_assignment():
+    # Multi-question assignments never remap: a "Q9:" label stays Q9.
+    sub = Submission("A", "a@x.edu", "sci-water-cycle-01", "text",
+                     "Q9: evaporation")
+    assert extract_answers(sub) == {"Q9": "evaporation"}

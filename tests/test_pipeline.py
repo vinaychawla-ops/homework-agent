@@ -111,3 +111,21 @@ def test_pipeline_multi_question_no_fallback():
         assignment, "Test Kid", "kid@example.edu", "text", "some unlabeled prose"
     )
     assert all(e.points_earned == 0 for e in sheet.evaluations)
+
+
+def test_pipeline_single_question_mislabeled_number_still_grades():
+    # Production 2026-09-13: the VLM transcribed Vin's rainbow photo with the
+    # question number misread as "Q17:", which parsed to {"Q17": ...} and
+    # scored Q1 as "(no answer provided)". The whole response must grade.
+    mailer = MockEmailService()
+    sheet, _ = run_pipeline(
+        assignments.get_assignment("sci-rainbows-01"),
+        "T", "t@e.edu", "image", sample_path("science_homework.png"),
+        transcribed_text=(
+            "Q17: When you have rain and shine at the same time, "
+            "sunlight passes through rain drops and creates a rainbow."
+        ),
+        email_service=mailer,
+    )
+    assert sheet.percentage == 100.0
+    assert sheet.evaluations[0].student_answer != "(no answer provided)"

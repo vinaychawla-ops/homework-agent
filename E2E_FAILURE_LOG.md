@@ -186,3 +186,38 @@ Live production browser test (public URL):
 - TEST 2 (typed text regression): PASS. "Q1: b" → Score 1/5 (20.0%), Q1 Correct
   (1/1 pts), unanswered questions Incorrect with "(no answer provided)".
 - VERDICT: the real-upload flow Vin hit now works end-to-end in the browser.
+
+## 2026-09-13 ~10:06 EDT — production browser E2E: 2 new failures (post free-text/Rainbows deploy)
+
+### BUG 5 — Vin's real rainbow photo grades 0/1 "(no answer provided)" in auto mode
+- Browser: uploaded Vin's actual handwritten JPEG, assignment "Rainbows",
+  OCR mode auto → `Graded Homework: Rainbows`, Score 0/1, "(no answer provided)".
+- Direct API repro: `ocr_mode=auto` and `ocr_mode=vlm` → 0/1 "(no answer provided)";
+  `ocr_mode=docling` → 1/1 (100%). Deterministic in production.
+- Root cause: the `openrouter-api-key` Modal secret exists in Vin's workspace,
+  so auto mode takes the VLM branch. The VLM misread the handwritten "Q1" as
+  "Q17:" (with a colon). `parse_text` then returned the non-empty dict
+  `{"Q17": ...}`; the single-question fallback only triggered on a completely
+  empty parse, so Q1 was looked up, missed, and graded as "(no answer provided)".
+- Fix (`homework_agent/submission.py::extract_answers`): for single-question
+  assignments, when the expected question id is missing or blank, remap —
+  prefer any parsed answer text (the number was misread), else the raw text.
+  Multi-question assignments are untouched (no remapping).
+- Tests: 4 new in `tests/test_submission.py` (mislabeled Q17→Q1, joined
+  multiples, blank primary, multi-question no-remap) + 1 pipeline test
+  simulating the VLM "Q17:" transcription grading 100%.
+
+### BUG 6 — "Use sample photo" button dead: "Error" status, box never updates
+- Browser: clicking the button did nothing; assignment box stayed "Rainbows";
+  an "Error" label appeared. `/api/sample-image` itself returns 200 (valid PNG).
+- Root cause: `_SAMPLE_JS` called
+  `Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set`
+  on the assignment element, which in Gradio 6 is a `<textarea>` → TypeError
+  "Illegal invocation" → the async handler rejected before returning the status.
+- Fix (`space/app.py::_SAMPLE_JS`): plain `ab.value = 'The Water Cycle'` plus a
+  synthetic `input` event (what Svelte listens for), wrapped in try/catch, with
+  the photo bytes stashed before the DOM update so a DOM quirk can never break
+  the button again.
+- Verified: `node --check` on all 4 JS blobs ✅; DOM-stub test (textarea stub)
+  confirms no throw, box set to "The Water Cycle", `input` event dispatched,
+  bytes stashed ✅.

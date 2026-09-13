@@ -127,14 +127,24 @@ def extract_answers(
 ) -> Dict[str, str]:
     """Dispatch to the right parser based on submission.format.
 
-    ``fallback_question_id``: when the assignment has exactly one question
-    and no ``"Q<n>:"`` answer lines could be parsed (e.g. handwriting OCR
-    mangled the label), the whole raw text is graded as that question's
-    answer instead of scoring a certain zero. With several questions there
-    is no way to attribute the text, so the fallback never applies.
+    ``fallback_question_id``: when the assignment has exactly one question,
+    the student's whole response belongs to that question even when OCR
+    mislabels the question number (e.g. the VLM reads "Q1" as "Q17:") or
+    finds no ``"Q<n>:"`` label at all. With several questions there is no
+    way to attribute the text, so the fallback never applies.
     """
     text = _raw_text(submission, ocr_mode=ocr_mode)
     answers = parse_text(text)
-    if not answers and fallback_question_id and text.strip():
-        answers = {fallback_question_id: text.strip()}
+    if fallback_question_id and not answers.get(fallback_question_id, "").strip():
+        # Single-question assignment whose expected id is missing or blank:
+        # prefer any parsed answer text (the number was misread), else the
+        # raw text, instead of scoring a certain zero.
+        others = " ".join(
+            value.strip()
+            for qid, value in answers.items()
+            if qid != fallback_question_id and value.strip()
+        )
+        replacement = others or text.strip()
+        if replacement:
+            answers = {fallback_question_id: replacement}
     return answers
