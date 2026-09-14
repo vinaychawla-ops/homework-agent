@@ -68,7 +68,10 @@ image = (
     cpu=2,
     memory=8192,
     timeout=900,
-    secrets=[modal.Secret.from_name("openrouter-api-key")],
+    secrets=[
+        modal.Secret.from_name("openrouter-api-key"),
+        modal.Secret.from_name("gmail-smtp"),
+    ],
     volumes={"/root/data/assignments": modal.Volume.from_name(
         "homework-assignments", create_if_missing=True
     )},
