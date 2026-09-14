@@ -282,3 +282,72 @@ def test_extract_answers_echo_guard_ignores_legitimate_restatement():
         fallback_question_id="Q1",
         question_prompts={"Q1": "How is a rainbow created in the sky?"},
     ) == {"Q1": "A rainbow is created when sunlight shines through raindrops."}
+
+
+def _rainbow_sub(text):
+    return Submission("A", "a@x.edu", "sci-rainbows-01", "text", text)
+
+
+_RAINBOW_PROMPT = {"Q1": "How is a rainbow created in the sky?"}
+
+
+def test_extract_answers_answer_before_question_line():
+    # VLM transcribed the "Ans:" line before the question line: the answer
+    # must still be attributed instead of reporting "no answer provided".
+    sub = _rainbow_sub("Ans: Due to rain.\nQ1: Q. How is Rainbow created in the sky?")
+    assert extract_answers(
+        sub, fallback_question_id="Q1", question_prompts=_RAINBOW_PROMPT
+    ) == {"Q1": "Due to rain."}
+
+
+def test_extract_answers_unlabeled_answer_line():
+    # The answer sits on its own line with no label at all: the residual
+    # (transcription minus the question echo) becomes the answer.
+    sub = _rainbow_sub("Q1: Q. How is Rainbow created in the sky?\nDue to rain.")
+    assert extract_answers(
+        sub, fallback_question_id="Q1", question_prompts=_RAINBOW_PROMPT
+    ) == {"Q1": "Due to rain."}
+
+
+def test_extract_answers_bare_a_label():
+    # A bare "A:" is an answer label too.
+    sub = _rainbow_sub("Q1: Q. How is Rainbow created in the sky?\nA: Due to rain.")
+    assert extract_answers(
+        sub, fallback_question_id="Q1", question_prompts=_RAINBOW_PROMPT
+    ) == {"Q1": "Due to rain."}
+
+
+def test_extract_answers_echo_with_no_residual_stays_empty():
+    # Question only, no answer anywhere: still "no answer provided",
+    # the residual must not resurrect the question itself.
+    sub = _rainbow_sub("Q1: Q. How is Rainbow created in the sky?")
+    assert extract_answers(
+        sub, fallback_question_id="Q1", question_prompts=_RAINBOW_PROMPT
+    ) == {}
+
+
+def test_extract_answers_residual_drops_echo_keeps_answer():
+    # Echo and answer on separate unlabeled lines: only the answer survives.
+    sub = _rainbow_sub(
+        "How is Rainbow created in the sky?\nIt is due to rain I think."
+    )
+    assert extract_answers(
+        sub, fallback_question_id="Q1", question_prompts=_RAINBOW_PROMPT
+    ) == {"Q1": "It is due to rain I think."}
+
+
+def test_extract_answers_residual_without_prompt_uses_raw_text():
+    # No question prompts available: keep the old raw-text fallback.
+    sub = _rainbow_sub("Some handwritten response without any labels.")
+    assert extract_answers(sub, fallback_question_id="Q1") == {
+        "Q1": "Some handwritten response without any labels."}
+
+
+def test_parse_text_bare_a_attaches_to_current_question():
+    assert parse_text("Q1: something\nA: Due to rain.") == {"Q1": "Due to rain."}
+
+
+def test_parse_text_bare_a_word_not_a_label():
+    # A bare word "a" is never treated as an answer label.
+    assert parse_text("Q1: a rainbow forms after rain") == {
+        "Q1": "a rainbow forms after rain"}

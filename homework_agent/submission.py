@@ -26,16 +26,17 @@ from .models import Submission
 
 _ANSWER_LINE = re.compile(r"^\s*(Q\s*\d+)\s*[:.)\-]\s*(.+?)\s*$", re.IGNORECASE)
 #: Answer labels students use instead of repeating the question:
-#: "Ans:", "Answer:", or "A<n>:" ("A1: ...").
+#: "Ans:", "Answer:", "A<n>:" ("A1: ..."), or a bare "A:".
 _ANSWER_LABEL = re.compile(
-    r"^\s*(Ans(?:wer)?|A\s*\d+)\s*[:.)\-]\s*(.+?)\s*$", re.IGNORECASE
+    r"^\s*(Ans(?:wer)?|A\s*\d*)\s*[:.)\-]\s*(.+?)\s*$", re.IGNORECASE
 )
 # Zero-width split before every "Q<n>:" marker (and answer label), so
 # transcriptions that put several answers on one line ("Q1: b Q2: x = 4",
 # "Q1: ... Ans: ...") still parse. The letter guard keeps "ans" inside
-# ordinary words (e.g. "trans:") from splitting the line.
+# ordinary words (e.g. "trans:") from splitting the line, and the required
+# delimiter keeps a bare word "a" from matching.
 _Q_SPLIT = re.compile(
-    r"(?=(?:Q\s*\d+|(?<![A-Za-z])(?:Ans(?:wer)?|A\s*\d+))\s*[:.)\-])",
+    r"(?=(?:Q\s*\d+|(?<![A-Za-z])(?:Ans(?:wer)?|A\s*\d*))\s*[:.)\-])",
     re.IGNORECASE,
 )
 
@@ -185,6 +186,38 @@ def _is_question_echo(answer: str, question: str) -> bool:
     return difflib.SequenceMatcher(None, a, q).ratio() >= 0.9
 
 
+def _strip_leading_label(segment: str) -> str:
+    """Remove one leading "Q<n>:" / answer label from a transcription line."""
+    segment = segment.strip()
+    qmatch = _ANSWER_LINE.match(segment)
+    if qmatch:
+        return qmatch.group(2).strip()
+    amatch = _ANSWER_LABEL.match(segment)
+    if amatch:
+        return amatch.group(2).strip()
+    return segment
+
+
+def _residual_answer_text(text: str, question: str) -> str:
+    """Transcription text with question-echo lines removed.
+
+    For a single-question assignment, whatever the student wrote besides
+    repeating the question is their answer -- even when it carries no
+    "Q1:"/"Ans:" label the parser understands, or the answer line came
+    before the question line. Label prefixes are stripped so the answer
+    reads cleanly.
+    """
+    kept: List[str] = []
+    for line in text.splitlines():
+        content = _strip_leading_label(line)
+        if not content:
+            continue
+        if question and _is_question_echo(content, question):
+            continue
+        kept.append(content)
+    return " ".join(kept).strip()
+
+
 def extract_answers(
     submission: Submission,
     *,
@@ -196,9 +229,13 @@ def extract_answers(
 
     ``fallback_question_id``: when the assignment has exactly one question,
     the student's whole response belongs to that question even when OCR
-    mislabels the question number (e.g. the VLM reads "Q1" as "Q17:") or
-    finds no ``"Q<n>:"`` label at all. With several questions there is no
-    way to attribute the text, so the fallback never applies.
+    mislabels the question number (e.g. the VLM reads "Q1" as "Q17:"), finds
+    no ``"Q<n>:"`` label at all, or the only parsed "answer" is the question
+    echoed back (e.g. "Q1: Q. How is ...?"). In the echo case the leftover
+    transcription text -- question lines removed -- becomes the answer, so
+    an unlabeled or misplaced answer line is not lost. With several
+    questions there is no way to attribute the text, so the fallback never
+    applies.
 
     ``question_prompts``: {question_id: question text}; answers that merely
     repeat the question back are discarded so they grade as "no answer
@@ -206,19 +243,29 @@ def extract_answers(
     """
     text = _raw_text(submission, ocr_mode=ocr_mode)
     answers, unclaimed = _parse_text_full(text)
-    if fallback_question_id and not answers.get(fallback_question_id, "").strip():
-        # Single-question assignment whose expected id is missing or blank:
-        # prefer any parsed answer text (the number was misread), then an
-        # "Ans:"-style line with no question to attach to, then the raw
-        # text, instead of scoring a certain zero.
-        others = " ".join(
-            value.strip()
-            for qid, value in answers.items()
-            if qid != fallback_question_id and value.strip()
-        )
-        replacement = others or " ".join(unclaimed) or text.strip()
-        if replacement:
-            answers = {fallback_question_id: replacement}
+    if fallback_question_id:
+        qid = fallback_question_id
+        current = answers.get(qid, "").strip()
+        prompt = (question_prompts or {}).get(qid, "")
+        if not current or (prompt and _is_question_echo(current, prompt)):
+            # Single-question assignment whose answer is missing, or is just
+            # the question echoed back: attribute the transcription's leftover
+            # text to the question. Prefer explicitly parsed answers (a
+            # misread question number), then unclaimed "Ans:"-style lines,
+            # then the residual text with question echoes removed. Nothing
+            # left -> the echo entry is dropped so it grades as "no answer
+            # provided" instead of scoring a certain zero.
+            others = " ".join(
+                value.strip()
+                for other_qid, value in answers.items()
+                if other_qid != qid and value.strip()
+            )
+            residual = _residual_answer_text(text, prompt) if prompt else text.strip()
+            replacement = others or " ".join(unclaimed) or residual
+            if replacement:
+                answers = {qid: replacement}
+            elif qid in answers:
+                del answers[qid]
     if question_prompts:
         for qid in list(answers):
             prompt = question_prompts.get(qid, "")
