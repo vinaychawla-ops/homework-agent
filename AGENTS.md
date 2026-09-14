@@ -60,7 +60,8 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
   overrides the assignment's teacher address — the web UI collects the
   teacher's email on the form and every grading goes to both student and
   teacher. On Modal, the Gmail credentials live in the `gmail-smtp` secret
-  (optional; skipped when absent).
+  (live since 2026-09-14: sender aequitaslabs@gmail.com, a dedicated account,
+  not the user's personal Gmail).
 
 ## Running things
 
@@ -78,8 +79,9 @@ Notes for AI agents working on this repo. Keep this file current when behavior c
 
 ## Known demo seams (production TODOs)
 
-1. `email_service.SmtpEmailService` — live when the `gmail-smtp` Modal secret
-   exists; pending until the dedicated sender Gmail account is accessible.
+1. `email_service.SmtpEmailService` — live since 2026-09-14 via the
+   `gmail-smtp` Modal secret (dedicated sender aequitaslabs@gmail.com).
+   Every grading emails the student and the teacher for real.
 2. Short-answer grading is keyword-concept matching; an LLM judge would give
    richer feedback.
 3. Free-tier OpenRouter rate limits can make the VLM handwriting path flaky;
