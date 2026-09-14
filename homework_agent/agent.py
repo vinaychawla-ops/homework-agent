@@ -53,7 +53,11 @@ def intake_tool(
         content=content,
         transcribed_text=transcribed_text or None,
     )
-    return submission.extract_answers(sub, ocr_mode=ocr_mode)
+    return submission.extract_answers(
+        sub,
+        ocr_mode=ocr_mode,
+        question_prompts={q.id: q.prompt for q in assignment.questions},
+    )
 
 
 def grade_tool(assignment_id: str, answers: Dict[str, str]) -> Dict:

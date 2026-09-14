@@ -16,35 +16,78 @@ Scanned PDFs with no usable text layer fall back to Docling OCR as well.
 
 from __future__ import annotations
 
+import difflib
 import os
 import re
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import ocr as _ocr
 from .models import Submission
 
 _ANSWER_LINE = re.compile(r"^\s*(Q\s*\d+)\s*[:.)\-]\s*(.+?)\s*$", re.IGNORECASE)
-# Zero-width split before every "Q<n>:" marker, so transcriptions that put
-# several answers on one line ("Q1: b Q2: x = 4") still parse.
-_Q_SPLIT = re.compile(r"(?=(Q\s*\d+)\s*[:.)\-])", re.IGNORECASE)
+#: Answer labels students use instead of repeating the question:
+#: "Ans:", "Answer:", or "A<n>:" ("A1: ...").
+_ANSWER_LABEL = re.compile(
+    r"^\s*(Ans(?:wer)?|A\s*\d+)\s*[:.)\-]\s*(.+?)\s*$", re.IGNORECASE
+)
+# Zero-width split before every "Q<n>:" marker (and answer label), so
+# transcriptions that put several answers on one line ("Q1: b Q2: x = 4",
+# "Q1: ... Ans: ...") still parse. The letter guard keeps "ans" inside
+# ordinary words (e.g. "trans:") from splitting the line.
+_Q_SPLIT = re.compile(
+    r"(?=(?:Q\s*\d+|(?<![A-Za-z])(?:Ans(?:wer)?|A\s*\d+))\s*[:.)\-])",
+    re.IGNORECASE,
+)
 
 #: A PDF text layer shorter than this (non-whitespace chars) is treated as a
 #: scanned PDF and re-processed with Docling OCR.
 _SCANNED_PDF_THRESHOLD = 30
 
 
-def parse_text(text: str) -> Dict[str, str]:
-    """Extract {question_id: answer} from plain text."""
+def _parse_text_full(text: str) -> Tuple[Dict[str, str], List[str]]:
+    """Extract ({question_id: answer}, unclaimed answer-label texts).
+
+    Understands "Q<n>:" question markers and answer labels ("Ans:",
+    "Answer:", "A<n>:"). "A<n>:" maps directly onto Q<n>; "Ans:" /
+    "Answer:" attach to the most recently seen question marker. An answer
+    label with no question to attach to is returned in ``unclaimed`` so the
+    single-question fallback in ``extract_answers`` can still use it.
+    """
     answers: Dict[str, str] = {}
+    unclaimed: List[str] = []
+    current_qid: Optional[str] = None
     for line in text.splitlines():
         for segment in _Q_SPLIT.split(line):
             segment = segment.strip()
             if not segment:
                 continue
-            match = _ANSWER_LINE.match(segment)
-            if match:
-                qid = re.sub(r"\s+", "", match.group(1)).upper()
-                answers[qid] = match.group(2).strip()
+            qmatch = _ANSWER_LINE.match(segment)
+            if qmatch:
+                current_qid = re.sub(r"\s+", "", qmatch.group(1)).upper()
+                answers[current_qid] = qmatch.group(2).strip()
+                continue
+            amatch = _ANSWER_LABEL.match(segment)
+            if amatch:
+                label = re.sub(r"\s+", "", amatch.group(1)).upper()
+                content = amatch.group(2).strip()
+                if not content:
+                    continue
+                number = label[1:] if label.startswith("A") else ""
+                if number.isdigit():
+                    answers[f"Q{number}"] = content
+                elif current_qid is not None:
+                    # An explicit answer label wins over whatever the
+                    # "Q<n>:" line captured (often the question text itself
+                    # in photo transcriptions).
+                    answers[current_qid] = content
+                else:
+                    unclaimed.append(content)
+    return answers, unclaimed
+
+
+def parse_text(text: str) -> Dict[str, str]:
+    """Extract {question_id: answer} from plain text."""
+    answers, _ = _parse_text_full(text)
     return answers
 
 
@@ -119,11 +162,35 @@ def _raw_text(submission: Submission, *, ocr_mode: Optional[str] = None) -> str:
     raise ValueError(f"Unsupported submission format: {submission.format!r}")
 
 
+def _is_question_echo(answer: str, question: str) -> bool:
+    """True when the 'answer' is just the question text repeated back.
+
+    Photo transcriptions sometimes label the handwritten question line
+    itself ("Q1: Q. How is ...?"), and the parser then mistakes the question
+    for the student's answer. Such echoes must not be graded as answers.
+    """
+
+    def norm(s: str) -> str:
+        s = s.lower()
+        # Strip a leading "Q1:" / "Q." style label remnant (the delimiter is
+        # required so words merely starting with "q", e.g. "quick", survive).
+        s = re.sub(r"^q\s*\d*\s*[:.)\-]\s*", "", s)
+        return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", "", s)).strip()
+
+    a, q = norm(answer), norm(question)
+    if not a or not q:
+        return False
+    if a == q:
+        return True
+    return difflib.SequenceMatcher(None, a, q).ratio() >= 0.9
+
+
 def extract_answers(
     submission: Submission,
     *,
     ocr_mode: Optional[str] = None,
     fallback_question_id: Optional[str] = None,
+    question_prompts: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Dispatch to the right parser based on submission.format.
 
@@ -132,19 +199,29 @@ def extract_answers(
     mislabels the question number (e.g. the VLM reads "Q1" as "Q17:") or
     finds no ``"Q<n>:"`` label at all. With several questions there is no
     way to attribute the text, so the fallback never applies.
+
+    ``question_prompts``: {question_id: question text}; answers that merely
+    repeat the question back are discarded so they grade as "no answer
+    provided" instead of being scored against themselves.
     """
     text = _raw_text(submission, ocr_mode=ocr_mode)
-    answers = parse_text(text)
+    answers, unclaimed = _parse_text_full(text)
     if fallback_question_id and not answers.get(fallback_question_id, "").strip():
         # Single-question assignment whose expected id is missing or blank:
-        # prefer any parsed answer text (the number was misread), else the
-        # raw text, instead of scoring a certain zero.
+        # prefer any parsed answer text (the number was misread), then an
+        # "Ans:"-style line with no question to attach to, then the raw
+        # text, instead of scoring a certain zero.
         others = " ".join(
             value.strip()
             for qid, value in answers.items()
             if qid != fallback_question_id and value.strip()
         )
-        replacement = others or text.strip()
+        replacement = others or " ".join(unclaimed) or text.strip()
         if replacement:
             answers = {fallback_question_id: replacement}
+    if question_prompts:
+        for qid in list(answers):
+            prompt = question_prompts.get(qid, "")
+            if prompt and _is_question_echo(answers[qid], prompt):
+                del answers[qid]
     return answers

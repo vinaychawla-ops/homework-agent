@@ -152,3 +152,41 @@ def test_pipeline_teacher_email_defaults_to_assignment():
         email_service=mailer,
     )
     assert emails[1].to == "chen.teacher@example.edu"
+
+
+def test_pipeline_photo_ans_label_shows_student_response():
+    # Regression (production 2026-09-14): a photo transcribed as
+    # "Q1: Q. How is Rainbow created in the sky?\nAns: Due to rain." showed
+    # the question text as the student answer in the emailed sheet.
+    mailer = MockEmailService()
+    sheet, emails = run_pipeline(
+        assignments.get_assignment("sci-rainbows-01"),
+        "Vin Test", "vin.test@example.edu", "image",
+        sample_path("science_homework.png"),
+        transcribed_text=(
+            "Q1: Q. How is Rainbow created in the sky?\nAns: Due to rain."
+        ),
+        email_service=mailer,
+        teacher_email="teacher@example.edu",
+    )
+    ev = sheet.evaluations[0]
+    assert ev.student_answer == "Due to rain."
+    assert "Due to rain." in emails[0].body
+    assert "Student answer: Q. How is Rainbow" not in emails[0].body
+
+
+def test_pipeline_question_only_transcription_is_no_answer():
+    # When the transcription holds only the question, the sheet reports
+    # "(no answer provided)" instead of grading the question against itself.
+    mailer = MockEmailService()
+    sheet, _ = run_pipeline(
+        assignments.get_assignment("sci-rainbows-01"),
+        "Vin Test", "vin.test@example.edu", "image",
+        sample_path("science_homework.png"),
+        transcribed_text="Q. How is Rainbow created in the sky?",
+        email_service=mailer,
+        teacher_email="teacher@example.edu",
+    )
+    ev = sheet.evaluations[0]
+    assert ev.student_answer == "(no answer provided)"
+    assert ev.points_earned == 0

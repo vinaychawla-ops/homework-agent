@@ -56,6 +56,9 @@ def run_pipeline(
         fallback_question_id=(
             assignment.questions[0].id if len(assignment.questions) == 1 else None
         ),
+        # Answers that merely repeat the question text (common in photo
+        # transcriptions) are discarded and grade as "no answer provided".
+        question_prompts={q.id: q.prompt for q in assignment.questions},
     )
     sheet = grading.grade_submission(assignment, answers)
     sheet = replace(sheet, student_name=student_name, student_email=student_email)
